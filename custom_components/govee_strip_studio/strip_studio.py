@@ -25,8 +25,12 @@ from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
+from .effect_compiler import compile_application, resolve_diy_code
+from .effect_deployments import DeploymentPhase
+from .effect_setup import get_effect_backend
 from .light_commands import build_segment_color
 from .studio_render import (
     DIRECTIONS,
@@ -35,13 +39,14 @@ from .studio_render import (
     Geometry,
     StudioValidationError,
     frame_writes,
+    native_pattern,
     quantized_frame,
     render,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-STUDIO_VERSION = "0.1.2"
+STUDIO_VERSION = "0.1.3"
 STORE_KEY = f"{DOMAIN}.strip_studio"
 STORE_VERSION = 1
 PANEL_PATH = "strip-studio"
@@ -94,6 +99,8 @@ class StripStudio:
         self.store: Store[dict[str, Any]] = Store(hass, STORE_VERSION, STORE_KEY)
         self.data: dict[str, Any] = {"geometry": {}, "effects": {}}
         self.players: dict[str, _Player] = {}
+        # Effects the strip is animating by itself (native playback), per entry.
+        self.native: dict[str, dict[str, Any]] = {}
         self.listeners: set[Any] = set()
         self._state_unsubs: dict[str, Any] = {}
 
@@ -159,6 +166,7 @@ class StripStudio:
             "geometry": self.geometry(entry_id).to_dict(),
             "light_entity_id": self.light_entity_id(entry_id),
             "player": player.status() if player else None,
+            "native": self.native.get(entry_id),
         }
 
     # -- playback ----------------------------------------------------------------
@@ -179,6 +187,13 @@ class StripStudio:
         the segments that actually change are sent.  A normal play repaints everything,
         which also recovers from any change made to the strip outside the studio.
         """
+        if effect.playback == "native":
+            await self.async_stop(entry_id, notify=False)
+            await self._async_apply_native(entry_id, effect, name)
+            self.native[entry_id] = {"name": name, "effect": effect.to_dict()}
+            self._notify(entry_id)
+            return
+        self.native.pop(entry_id, None)
         player = self.players.get(entry_id)
         if live and player is not None and player.task is not None and not player.task.done():
             player.effect = effect
@@ -195,6 +210,44 @@ class StripStudio:
         )
         self._watch_light(entry_id)
         self._notify(entry_id)
+
+    async def _async_apply_native(self, entry_id: str, effect: Effect, name: str | None) -> None:
+        """Upload a per-IC painted pattern; the strip then animates it on its own.
+
+        Mirrors upstream's ``editor/apply_snapshot`` handler (compile, supersede previews,
+        apply) so deployment bookkeeping stays consistent with the expert editor.
+        """
+        backend = get_effect_backend(self.hass)
+        if backend is None:
+            raise StudioValidationError("the effect backend of this integration is not available")
+        coordinator = self.coordinator(entry_id)
+        geometry = self.geometry(entry_id)
+        if geometry.units != coordinator.profile.physical_ic_count:
+            raise StudioValidationError("this device does not report its IC count")
+        pattern = native_pattern(effect, geometry)
+        item = backend.application.new_authored_item(
+            name=(name or "Strip Studio")[:40],
+            content={
+                "kind": "h617a_painted",
+                "effect": pattern.effect,
+                "speed": pattern.speed,
+                "brightness": effect.brightness,
+                "segments": [None if c is None else list(c) for c in pattern.colors],
+                "addressing": "physical_ic",
+            },
+        )
+        diy_code = resolve_diy_code(item, None, model=coordinator.model, profile=coordinator.profile)
+        compile_application(item, coordinator.model, diy_code=diy_code, profile=coordinator.profile)
+        await backend.preview.async_supersede_device(entry_id, reason="committed_apply")
+        result = await backend.engine.async_apply_snapshot(
+            coordinator,
+            item,
+            config_entry_id=entry_id,
+            updated_at=dt_util.utcnow().isoformat(),
+            diy_code=diy_code,
+        )
+        if result.phase is DeploymentPhase.FAILED:
+            raise StudioValidationError(f"the strip rejected the pattern ({result.error_code or 'unknown error'})")
 
     async def async_stop(self, entry_id: str, *, notify: bool = True) -> None:
         player = self.players.get(entry_id)
@@ -376,8 +429,11 @@ async def ws_geometry_set(
         }
         await studio.async_save()
         player = studio.players.get(msg["entry_id"])
+        native = studio.native.get(msg["entry_id"])
         if player is not None and player.task is not None and not player.task.done():
             await studio.async_play(msg["entry_id"], player.effect, name=player.name)
+        elif native is not None:
+            await studio.async_play(msg["entry_id"], Effect.from_dict(native["effect"]), name=native["name"])
     except Exception as err:  # noqa: BLE001
         _error(connection, msg["id"], err)
         return
@@ -532,5 +588,6 @@ async def async_unload_strip_studio_entry(hass: HomeAssistant, entry_id: str) ->
         return
     await studio.async_stop(entry_id, notify=False)
     studio.players.pop(entry_id, None)
+    studio.native.pop(entry_id, None)
     if (unsub := studio._state_unsubs.pop(entry_id, None)) is not None:
         unsub()

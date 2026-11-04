@@ -16,6 +16,11 @@ RGB = tuple[int, int, int]
 
 EFFECT_TYPES = ("static", "segments", "gradient", "fade", "marquee")
 DIRECTIONS = ("forward", "backward", "center_out", "edges_in")
+# "ha": Home Assistant sends every frame per segment.  "native": a per-IC pattern is
+# uploaded once and the strip animates it itself (smooth, finer, but fewer options).
+PLAYBACKS = ("ha", "native")
+NATIVE_TYPES = ("static", "segments", "gradient", "marquee")
+NATIVE_DIRECTIONS = ("forward", "backward")
 BLACK: RGB = (0, 0, 0)
 
 
@@ -136,6 +141,7 @@ class Effect:
     levels: tuple[int, ...] = ()
     # Marquee: how far each block dims from its head to its tail, in percent.
     tail: int = 0
+    playback: str = "ha"
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -159,6 +165,13 @@ class Effect:
         object.__setattr__(self, "background", _rgb(self.background, "background"))
         object.__setattr__(self, "levels", tuple(_int(v, "segment brightness", 1, 100) for v in self.levels))
         _int(self.tail, "tail", 0, 100)
+        if self.playback not in PLAYBACKS:
+            raise StudioValidationError(f"unknown playback {self.playback!r}")
+        if self.playback == "native":
+            if self.type not in NATIVE_TYPES:
+                raise StudioValidationError("this effect type cannot be played by the strip itself")
+            if self.type == "marquee" and self.direction not in NATIVE_DIRECTIONS:
+                raise StudioValidationError("the strip itself can only move away from or towards the controller")
         if self.type == "segments" and not self.segments:
             raise StudioValidationError("a segmented effect needs segment colours")
 
@@ -184,6 +197,7 @@ class Effect:
             "background": list(self.background),
             "levels": list(self.levels),
             "tail": self.tail,
+            "playback": self.playback,
         }
 
     @classmethod
@@ -192,7 +206,7 @@ class Effect:
             raise StudioValidationError("effect must be an object")
         known = {
             "type", "colors", "segments", "direction", "speed", "block", "gap",
-            "spread", "brightness", "background", "levels", "tail",
+            "spread", "brightness", "background", "levels", "tail", "playback",
         }
         kwargs: dict[str, Any] = {k: raw[k] for k in known if k in raw}
         if "colors" in kwargs:
@@ -352,3 +366,80 @@ def frame_writes(
 
 def quantized_frame(frame: dict[int, RGB], step: int = 4) -> dict[int, RGB]:
     return {pos: quantize(color, step) for pos, color in frame.items()}
+
+
+# -- native playback ----------------------------------------------------------------
+# Measured on an H617C: firmware speed 50 moves ~2.4 ICs/s, 85 moves ~8 ICs/s.
+
+
+def native_ics_per_second(speed: int) -> float:
+    """Approximate movement of the strip's own animation, for labels and the preview."""
+    return 0.0 if speed <= 0 else 2.4 * 1.035 ** (speed - 50)
+
+
+def native_period(block: int, gap: int, ring: int) -> int:
+    """Smallest pattern period >= block + gap that divides the ring.
+
+    The strip rotates its pattern over every IC, including cut-off ones, so only a
+    period that divides the IC count wraps around without a visible seam.
+    """
+    period = min(block + gap, ring)
+    while ring % period:
+        period += 1
+    return period
+
+
+@dataclass(frozen=True, slots=True)
+class NativePattern:
+    effect: str  # firmware painted effect: clockwise | counter_clockwise | gradient
+    speed: int
+    colors: tuple[RGB | None, ...]  # one per physical IC from the controller; None = dark
+
+
+def native_pattern(effect: Effect, geometry: Geometry) -> NativePattern:
+    """Per-IC pattern for ``effect`` on ``geometry`` (in physical ICs).
+
+    ``segments``/``levels`` are per visible IC in native mode.  Overall brightness is
+    not baked in; it travels as the firmware brightness field.
+    """
+    ring = geometry.units
+    colors: list[RGB | None] = [None] * ring
+    visible = geometry.positions
+    if effect.type == "static":
+        for p in visible:
+            colors[p - 1] = effect.colors[0]
+        return NativePattern("clockwise", 0, tuple(colors))
+    if effect.type == "segments":
+        for i, p in enumerate(visible):
+            if i < len(effect.segments) and effect.segments[i] is not None:
+                level = effect.levels[i] if i < len(effect.levels) else 100
+                colors[p - 1] = _scale(effect.segments[i], level)
+        return NativePattern("clockwise", 0, tuple(colors))
+    if effect.type == "gradient":
+        n = len(effect.colors)
+        if effect.speed == 0:
+            span = max(len(visible) - 1, 1)
+            for i, p in enumerate(visible):
+                colors[p - 1] = _palette_smooth(effect.colors, i / span * (n - 1), cyclic=False)
+            return NativePattern("clockwise", 0, tuple(colors))
+        # Cyclic over the whole ring so the firmware's own blending has no seam.
+        for j in range(ring):
+            colors[j] = _palette_smooth(effect.colors, j / ring * n, cyclic=True)
+        return NativePattern("gradient", effect.speed, tuple(colors))
+    # marquee: the head of each block leads the motion.
+    away = (effect.direction == "forward") != geometry.reverse
+    period = native_period(effect.block, effect.gap, ring)
+    ncol = len(effect.colors)
+    for j in range(ring):
+        c = j if away else ring - 1 - j
+        within = c % period
+        if within >= effect.block:
+            colors[j] = None if effect.background == BLACK else effect.background
+            continue
+        color = effect.colors[(c // period) % ncol]
+        if effect.tail and effect.block > 1:
+            color = _dim(color, 1 - effect.tail / 100 * (effect.block - 1 - within) / effect.block)
+        colors[j] = color
+    if effect.speed == 0:
+        return NativePattern("clockwise", 0, tuple(colors))
+    return NativePattern("clockwise" if away else "counter_clockwise", effect.speed, tuple(colors))

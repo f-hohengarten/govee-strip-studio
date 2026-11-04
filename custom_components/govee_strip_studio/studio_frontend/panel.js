@@ -16,41 +16,6 @@ const DIRECTIONS = [
   { id: "edges_in", label: "Von den Seiten", glyph: "→←" },
 ];
 const PRESET_COLORS = ["#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#00c7be", "#0a84ff", "#5e5ce6", "#ff2d55", "#ffffff"];
-// Experiment: patterns painted per IC and played by the strip itself (upstream h617a_painted).
-const NATIVE_EFFECTS = [
-  { id: "clockwise", label: "Vom Controller weg" },
-  { id: "counter_clockwise", label: "Zum Controller hin" },
-  { id: "gradient", label: "Verlauf (Firmware)" },
-  { id: "breathe", label: "Atmen" },
-  { id: "twinkle", label: "Funkeln" },
-  { id: "cycle", label: "Zyklus" },
-];
-const NATIVE_PATTERNS = [
-  { id: "fine", label: "Feinraster", hint: "Jeder sichtbare Chip abwechselnd rot/blau – zähl die Felder." },
-  { id: "tail", label: "Marquee mit Ausklingen", hint: "5 Chips Rot, nach hinten dunkler, dann 5 aus." },
-  { id: "rainbow", label: "Regenbogen", hint: "Weicher Farbverlauf über alle 30 Chips." },
-];
-function hsv(h) {
-  const f = (n) => {
-    const k = (n + h * 6) % 6;
-    return Math.round(255 * (1 - Math.max(0, Math.min(k, 4 - k, 1))));
-  };
-  return [f(5), f(3), f(1)];
-}
-// One colour per physical IC (index 0 = IC 1 at the controller); null = dark.
-function nativePattern(id, icCount, first, last) {
-  return Array.from({ length: icCount }, (_, i) => {
-    const ic = i + 1;
-    if (id === "rainbow") return hsv(i / icCount);
-    if (id === "tail") {
-      const k = i % 10; // period 10 divides 30, so the loop over the hidden ICs is seamless
-      return k < 5 ? dim([255, 0, 0], (k + 1) / 5) : null;
-    }
-    if (ic < first || ic > last) return null;
-    return (ic - first) % 2 ? [0, 0, 255] : [255, 0, 0];
-  });
-}
-
 const TOOLS = [
   { id: "color", label: "Farbe" },
   { id: "off", label: "Aus" },
@@ -140,6 +105,75 @@ function render(e, g, t) {
   return out;
 }
 
+// ---------- native playback (mirror of studio_render.native_*) ----------
+const NATIVE_TYPES = ["static", "segments", "gradient", "marquee"];
+const NATIVE_DIRECTIONS = ["forward", "backward"];
+const nativeIcsPerSecond = (s) => (s <= 0 ? 0 : 2.4 * Math.pow(1.035, s - 50));
+function nativePeriod(block, gap, ring) {
+  let p = Math.min(block + gap, ring);
+  while (ring % p) p++;
+  return p;
+}
+function nativePattern(e, g) {
+  const ring = g.units;
+  const colors = new Array(ring).fill(null);
+  const vis = positions(g);
+  if (e.type === "static") {
+    vis.forEach((p) => (colors[p - 1] = e.colors[0]));
+    return { effect: "clockwise", speed: 0, colors };
+  }
+  if (e.type === "segments") {
+    const levels = e.levels || [];
+    vis.forEach((p, i) => {
+      if (e.segments[i]) colors[p - 1] = scale(e.segments[i], levels[i] ?? 100);
+    });
+    return { effect: "clockwise", speed: 0, colors };
+  }
+  if (e.type === "gradient") {
+    const n = e.colors.length;
+    if (e.speed === 0) {
+      const span = Math.max(vis.length - 1, 1);
+      vis.forEach((p, i) => (colors[p - 1] = paletteSmooth(e.colors, (i / span) * (n - 1), false)));
+      return { effect: "clockwise", speed: 0, colors };
+    }
+    for (let j = 0; j < ring; j++) colors[j] = paletteSmooth(e.colors, (j / ring) * n, true);
+    return { effect: "gradient", speed: e.speed, colors };
+  }
+  const away = (e.direction === "forward") !== Boolean(g.reverse);
+  const period = nativePeriod(e.block, e.gap, ring);
+  const black = e.background.every((v) => v === 0);
+  for (let j = 0; j < ring; j++) {
+    const c = away ? j : ring - 1 - j;
+    const within = c % period;
+    if (within >= e.block) {
+      colors[j] = black ? null : e.background;
+      continue;
+    }
+    const color = e.colors[Math.floor(c / period) % e.colors.length];
+    colors[j] = e.tail && e.block > 1 ? dim(color, 1 - ((e.tail / 100) * (e.block - 1 - within)) / e.block) : color;
+  }
+  return { effect: e.speed === 0 ? "clockwise" : away ? "clockwise" : "counter_clockwise", speed: e.speed, colors };
+}
+// Approximation of what the strip shows at time t (it steps whole ICs; its gradient blends).
+function nativeFrame(e, g, t) {
+  const pat = nativePattern(e, g);
+  const ring = g.units;
+  const at = (j) => pat.colors[((j % ring) + ring) % ring] || [0, 0, 0];
+  const shift = nativeIcsPerSecond(pat.speed) * t;
+  const out = {};
+  for (let j = 0; j < ring; j++) {
+    let c;
+    if (pat.speed === 0) c = at(j);
+    else if (pat.effect === "gradient") {
+      const x = j - shift;
+      const i = Math.floor(x);
+      c = lerp(at(i), at(i + 1), x - i);
+    } else c = at(pat.effect === "clockwise" ? j - Math.floor(shift) : j + Math.floor(shift));
+    out[j + 1] = dim(c, e.brightness / 100);
+  }
+  return out;
+}
+
 // ---------- helpers ----------
 const hexToRgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
 const rgbToHex = (c) => "#" + c.map((v) => v.toString(16).padStart(2, "0")).join("");
@@ -152,6 +186,7 @@ const DEFAULT_EFFECT = {
   segments: [],
   levels: [],
   tail: 0,
+  playback: "ha",
   direction: "center_out",
   speed: 40,
   block: 2,
@@ -173,7 +208,6 @@ class GoveeStripStudioPanel extends HTMLElement {
     this._live = false;
     this._paintColor = [255, 255, 255];
     this._tool = "color"; // color | off | level
-    this._native = { pattern: "fine", effect: "clockwise", speed: 0 };
     this._brushLevel = 100;
     this._editingId = null;
     this._name = "";
@@ -230,13 +264,38 @@ class GoveeStripStudioPanel extends HTMLElement {
     this._ensureSegments();
   }
 
+  _native() {
+    return this._effect.playback === "native";
+  }
+
+  // Geometry in the units the current playback paints: physical ICs (native) or segments.
+  _unitGeometry() {
+    return this._native() ? { ...this._geometry, units: this._device().ic_count } : this._segGeometry();
+  }
+
+  _setPlayback(mode) {
+    const e = this._effect;
+    if (mode === e.playback) return;
+    const before = positions(this._unitGeometry()).length;
+    e.playback = mode;
+    const after = positions(this._unitGeometry()).length;
+    const pick = (arr, fill) => Array.from({ length: after }, (_, i) => (arr || [])[Math.floor((i * before) / after)] ?? fill);
+    e.segments = pick(e.segments, null);
+    e.levels = pick(e.levels, 100);
+    const f = mode === "native" ? 2 : 0.5; // marquee lengths: segments <-> ICs
+    e.block = Math.min(30, Math.max(1, Math.round(e.block * f)));
+    e.gap = Math.min(30, Math.max(0, Math.round(e.gap * f)));
+    if (mode === "native" && !NATIVE_DIRECTIONS.includes(e.direction)) e.direction = "forward";
+    this._changed();
+  }
+
   _segGeometry() {
     const dev = this._device();
     return rescale({ ...this._geometry, units: dev.ic_count }, dev.segment_count);
   }
 
   _ensureSegments() {
-    const n = positions(this._segGeometry()).length;
+    const n = positions(this._unitGeometry()).length;
     const segs = this._effect.segments || [];
     const levels = this._effect.levels || [];
     this._effect.segments = Array.from({ length: n }, (_, i) => segs[i] || null);
@@ -321,55 +380,13 @@ class GoveeStripStudioPanel extends HTMLElement {
     this._render();
   }
 
-  async _sendNative() {
-    const dev = this._device();
-    const n = this._native;
-    const g = this._geometry;
-    await this._stop();
-    const res = await this._call({
-      type: `${DOMAIN}/editor/apply_snapshot`,
-      config_entry_id: this._entryId,
-      name: "Strip Studio Test",
-      updated_at: new Date().toISOString(),
-      content: {
-        kind: "h617a_painted",
-        effect: n.effect,
-        speed: n.speed,
-        brightness: 100,
-        segments: nativePattern(n.pattern, dev.ic_count, g.first, g.last),
-        addressing: "physical_ic",
-      },
-    });
-    const phase = res?.deployment?.phase;
-    this._toast("ok", `Test gesendet${phase ? ` (${phase})` : ""} – beschreib, was der Streifen zeigt`);
-  }
-
-  _nativeCard() {
-    const n = this._native;
-    const pat = NATIVE_PATTERNS.find((p) => p.id === n.pattern);
-    return `<section class="card">
-      <h2>Test: Wiedergabe im Streifen</h2>
-      <p class="hint">Experiment: Das Muster wird pro Chip in den Streifen geladen und läuft dort selbst – ohne Home Assistant im Takt. Ein Druck auf „Auf Streifen abspielen“ oben holt den normalen Modus zurück.</p>
-      <h3>Muster</h3>
-      <div class="tools">${NATIVE_PATTERNS.map(
-        (p) => `<button class="${n.pattern === p.id ? "sel" : ""}" data-nt-pattern="${p.id}">${p.label}</button>`,
-      ).join("")}</div>
-      <p class="hint" style="margin-top:8px">${pat.hint}</p>
-      <h3>Bewegung</h3>
-      <div class="tools">${NATIVE_EFFECTS.map(
-        (e) => `<button class="${n.effect === e.id ? "sel" : ""}" data-nt-effect="${e.id}">${e.label}</button>`,
-      ).join("")}</div>
-      <div class="sliders"><label class="row"><span>Tempo</span><input type="range" min="0" max="100" value="${n.speed}" data-nt-speed/><em>${n.speed}</em></label></div>
-      <div class="actions small"><button class="primary" data-act="native-send">Test senden</button></div>
-    </section>`;
-  }
-
   _changed(rerender = true) {
     this._t0 = performance.now();
     if (rerender) this._render();
     if (this._live) {
       clearTimeout(this._liveTimer);
-      this._liveTimer = setTimeout(() => this._play(true).catch(() => {}), 250);
+      // Native playback re-uploads the whole pattern, so give edits more time to settle.
+      this._liveTimer = setTimeout(() => this._play(true).catch(() => {}), this._native() ? 700 : 250);
     }
   }
 
@@ -385,11 +402,10 @@ class GoveeStripStudioPanel extends HTMLElement {
     const root = this.shadowRoot;
     const cells = root.querySelectorAll(".preview .cell");
     if (!cells.length || !this._device()) return;
-    const sg = this._segGeometry();
     const t = (performance.now() - this._t0) / 1000;
     let frame;
     try {
-      frame = render(this._effect, sg, t);
+      frame = this._native() ? nativeFrame(this._effect, this._unitGeometry(), t) : render(this._effect, this._segGeometry(), t);
     } catch (e) {
       return;
     }
@@ -405,6 +421,11 @@ class GoveeStripStudioPanel extends HTMLElement {
     const el = this.shadowRoot.querySelector(".status");
     if (!el) return;
     const s = this._status;
+    const native = this._device()?.native;
+    if (native && !(s && s.running)) {
+      el.innerHTML = `<span class="dot on"></span> Läuft im Streifen${native.name ? `: <b>${native.name}</b>` : ""}`;
+      return;
+    }
     if (!s || !s.running) {
       el.innerHTML = `<span class="dot off"></span> Streifen: kein Studio-Effekt aktiv`;
       return;
@@ -431,7 +452,10 @@ class GoveeStripStudioPanel extends HTMLElement {
     const e = this._effect;
     const g = this._geometry;
     const sg = this._segGeometry();
+    const ug = this._unitGeometry();
     const visible = positions(sg).length;
+    const native = this._native();
+    const canNative = NATIVE_TYPES.includes(e.type);
     const effects = Object.entries(this._info.effects || {});
     root.innerHTML = `
       <style>${STYLE}</style>
@@ -454,7 +478,7 @@ class GoveeStripStudioPanel extends HTMLElement {
             <span class="ctrl">● Controller</span>
             <span class="status"></span>
           </div>
-          <div class="preview">${this._segCells(dev, sg)}</div>
+          <div class="preview ${native ? "fine" : ""}">${this._previewCells(ug)}</div>
           <div class="actions">
             <button class="primary" data-act="play">▶ Auf Streifen abspielen</button>
             <button data-act="stop">■ Stopp</button>
@@ -469,11 +493,26 @@ class GoveeStripStudioPanel extends HTMLElement {
               (t) => `<button class="type ${e.type === t.id ? "sel" : ""}" data-type="${t.id}"><ha-icon icon="${t.icon}"></ha-icon><span>${t.label}</span></button>`,
             ).join("")}</div>
 
-            ${e.type === "segments" ? this._segmentEditor(sg) : this._colorEditor()}
+            ${
+              canNative
+                ? `<h3>Wiedergabe</h3>
+                  <div class="tools">
+                    <button class="${native ? "" : "sel"}" data-playback="ha">Präzise (Home Assistant)</button>
+                    <button class="${native ? "sel" : ""}" data-playback="native">Flüssig (im Streifen)</button>
+                  </div>
+                  <p class="hint" style="margin-top:8px">${
+                    native
+                      ? "Der Streifen spielt den Effekt selbst ab: flüssig und pro Chip fein. Bewegung nur vom oder zum Controller."
+                      : "Home Assistant sendet jedes Bild pro Segment: alle Richtungen, aber Bewegungen laufen in Schritten."
+                  }</p>`
+                : ""
+            }
+
+            ${e.type === "segments" ? this._segmentEditor(ug) : this._colorEditor()}
 
             ${
-              ["gradient", "fade", "marquee"].includes(e.type)
-                ? `<h3>Richtung</h3><div class="dirs">${DIRECTIONS.map(
+              ["gradient", "fade", "marquee"].includes(e.type) && !(native && e.type === "gradient")
+                ? `<h3>Richtung</h3><div class="dirs">${DIRECTIONS.filter((d) => !native || NATIVE_DIRECTIONS.includes(d.id)).map(
                     (d) => `<button class="dir ${e.direction === d.id ? "sel" : ""}" data-dir="${d.id}" title="${d.label}"><span class="glyph">${d.glyph}</span><span>${d.label}</span></button>`,
                   ).join("")}</div>`
                 : ""
@@ -497,8 +536,6 @@ class GoveeStripStudioPanel extends HTMLElement {
             </div>
           </section>
 
-          ${this._nativeCard()}
-
           <section class="card">
             <h2>Meine Effekte</h2>
             <div class="save-row">
@@ -516,7 +553,7 @@ class GoveeStripStudioPanel extends HTMLElement {
                           item.effect.direction && ["gradient", "fade", "marquee"].includes(item.effect.type)
                             ? " · " + (DIRECTIONS.find((d) => d.id === item.effect.direction)?.label || "")
                             : ""
-                        }</span></div>
+                        }${item.effect.playback === "native" ? " · im Streifen" : ""}</span></div>
                         <button data-lib-play="${id}" title="Abspielen">▶</button>
                         <button data-lib-edit="${id}" title="Bearbeiten">✎</button>
                         <button data-lib-del="${id}" title="Löschen">🗑</button>
@@ -538,11 +575,12 @@ class GoveeStripStudioPanel extends HTMLElement {
     return (cols.length ? cols : [[40, 40, 40]]).map((c) => `<i style="background:${css(c)}"></i>`).join("");
   }
 
-  _segCells(dev, sg) {
-    const vis = new Set(positions(sg));
+  _previewCells(g) {
+    const vis = new Set(positions(g));
+    const unit = this._native() ? "Chip" : "Segment";
     let out = "";
-    for (let s = 1; s <= dev.segment_count; s++) {
-      out += `<div class="cell ${vis.has(s) ? "" : "hidden"}" data-seg="${s}" title="Segment ${s}"></div>`;
+    for (let s = 1; s <= g.units; s++) {
+      out += `<div class="cell ${vis.has(s) ? "" : "hidden"}" data-seg="${s}" title="${unit} ${s}"></div>`;
     }
     return out;
   }
@@ -602,7 +640,7 @@ class GoveeStripStudioPanel extends HTMLElement {
           ? ""
           : `<label class="row"><span>Pinsel-Helligkeit</span><input type="range" min="1" max="100" value="${this._brushLevel}" data-brush-level/><em>${this._brushLevel} %</em></label>`
       }
-      <div class="paint">${pos.map((_, i) => this._segButton(i)).join("")}</div>
+      <div class="paint ${this._native() ? "fine" : ""}">${pos.map((_, i) => this._segButton(i)).join("")}</div>
       <div class="actions small">
         <button data-act="fill-all">Alle wie Pinsel</button>
         <button data-act="clear-all">Alle aus</button>
@@ -633,23 +671,42 @@ class GoveeStripStudioPanel extends HTMLElement {
     this._changed(false);
   }
 
+  _sliderText(k, v) {
+    const native = this._native();
+    if (k === "speed") {
+      if (v === 0) return "steht";
+      return native ? `≈ ${nativeIcsPerSecond(v).toFixed(1)} Chips/s` : `${speedToUnits(v).toFixed(1)} Seg/s`;
+    }
+    if (k === "spread" && v === 0) return "ganzer Streifen";
+    if (k === "tail" && v === 0) return "aus";
+    if (["brightness", "spread", "tail"].includes(k)) return `${v} %`;
+    return `${v} ${native ? "Chips" : "Seg"}`;
+  }
+
   _sliders() {
     const e = this._effect;
+    const native = this._native();
     const rows = [];
-    if (["gradient", "fade", "marquee"].includes(e.type))
-      rows.push(["speed", "Tempo", 0, 100, e.speed, e.speed === 0 ? "steht" : `${speedToUnits(e.speed).toFixed(1)} Seg/s`]);
+    if (["gradient", "fade", "marquee"].includes(e.type)) rows.push(["speed", "Tempo", 0, 100]);
     if (e.type === "marquee") {
-      rows.push(["block", "Blocklänge", 1, 6, e.block, `${e.block} Seg`]);
-      rows.push(["gap", "Lücke", 0, 6, e.gap, `${e.gap} Seg`]);
-      rows.push(["tail", "Ausklingen", 0, 100, e.tail || 0, e.tail ? `${e.tail} %` : "aus"]);
+      rows.push(["block", "Blocklänge", 1, native ? 12 : 6]);
+      rows.push(["gap", "Lücke", 0, native ? 12 : 6]);
+      rows.push(["tail", "Ausklingen", 0, 100]);
     }
-    if (e.type === "fade") rows.push(["spread", "Welle", 0, 100, e.spread, e.spread === 0 ? "ganzer Streifen" : `${e.spread} %`]);
-    rows.push(["brightness", "Gesamt-Helligkeit", 1, 100, e.brightness, `${e.brightness} %`]);
+    if (e.type === "fade") rows.push(["spread", "Welle", 0, 100]);
+    rows.push(["brightness", "Gesamt-Helligkeit", 1, 100]);
+    let note = "";
+    if (native && e.type === "marquee") {
+      const ring = this._device().ic_count;
+      const gap = nativePeriod(e.block, e.gap, ring) - e.block;
+      if (gap !== e.gap) note = `<p class="hint">Lücke wird auf ${gap} Chips verlängert, damit das Muster über alle ${ring} Chips nahtlos umläuft.</p>`;
+    }
     return `<div class="sliders">${rows
-      .map(
-        ([k, l, min, max, v, txt]) => `<label class="row"><span>${l}</span><input type="range" min="${min}" max="${max}" value="${v}" data-slider="${k}"/><em>${txt}</em></label>`,
-      )
-      .join("")}</div>`;
+      .map(([k, l, min, max]) => {
+        const v = e[k] ?? 0;
+        return `<label class="row"><span>${l}</span><input type="range" min="${min}" max="${max}" value="${v}" data-slider="${k}"/><em>${this._sliderText(k, v)}</em></label>`;
+      })
+      .join("")}</div>${note}`;
   }
 
   _bind() {
@@ -668,12 +725,14 @@ class GoveeStripStudioPanel extends HTMLElement {
     on("[data-type]", "click", (ev) => {
       const t = ev.currentTarget.dataset.type;
       this._effect.type = t;
+      if (!NATIVE_TYPES.includes(t) && this._native()) this._setPlayback("ha");
       if (t === "segments" && !this._effect.segments.some(Boolean)) {
-        const pos = positions(this._segGeometry());
+        const pos = positions(this._unitGeometry());
         this._effect.segments = pos.map((_, i) => this._effect.colors[i % this._effect.colors.length]);
       }
       this._changed();
     });
+    on("[data-playback]", "click", (ev) => this._setPlayback(ev.currentTarget.dataset.playback));
     on("[data-dir]", "click", (ev) => {
       this._effect.direction = ev.currentTarget.dataset.dir;
       this._changed();
@@ -697,24 +756,12 @@ class GoveeStripStudioPanel extends HTMLElement {
       this._effect.background = hexToRgb(ev.target.value);
       this._changed(false);
     });
+    // The gap note depends on block/gap; refresh it once a slider is released.
+    on("[data-slider=block], [data-slider=gap]", "change", () => this._native() && this._render());
     on("[data-slider]", "input", (ev) => {
       this._effect[ev.target.dataset.slider] = Number(ev.target.value);
       const em = ev.target.parentElement.querySelector("em");
-      const k = ev.target.dataset.slider;
-      const v = Number(ev.target.value);
-      if (em)
-        em.textContent =
-          k === "speed"
-            ? v === 0
-              ? "steht"
-              : `${speedToUnits(v).toFixed(1)} Seg/s`
-            : k === "spread" && v === 0
-              ? "ganzer Streifen"
-              : k === "tail" && v === 0
-                ? "aus"
-                : ["brightness", "spread", "tail"].includes(k)
-                  ? `${v} %`
-                  : `${v} Seg`;
+      if (em) em.textContent = this._sliderText(ev.target.dataset.slider, Number(ev.target.value));
       this._changed(false);
     });
     on("[data-brush-color]", "input", (ev) => {
@@ -769,20 +816,6 @@ class GoveeStripStudioPanel extends HTMLElement {
       this._effect.segments = this._effect.segments.map(() => null);
       this._changed();
     });
-    // native experiment
-    on("[data-nt-pattern]", "click", (ev) => {
-      this._native.pattern = ev.currentTarget.dataset.ntPattern;
-      this._render();
-    });
-    on("[data-nt-effect]", "click", (ev) => {
-      this._native.effect = ev.currentTarget.dataset.ntEffect;
-      this._render();
-    });
-    on("[data-nt-speed]", "input", (ev) => {
-      this._native.speed = Number(ev.target.value);
-      ev.target.parentElement.querySelector("em").textContent = ev.target.value;
-    });
-    on("[data-act=native-send]", "click", () => this._sendNative().catch(() => {}));
     // geometry
     on("[data-ic]", "click", (ev) => {
       const i = Number(ev.currentTarget.dataset.ic);
@@ -865,6 +898,8 @@ button.sel{border-color:var(--primary-color);box-shadow:0 0 0 1px var(--primary-
 .dot.off{background:var(--disabled-text-color,#888)}
 .preview{display:flex;gap:4px;padding:18px 14px;background:#0b0b0e;border-radius:12px;overflow-x:auto}
 .preview .cell{flex:1 1 0;min-width:18px;height:28px;border-radius:6px;transition:background .12s}
+.preview.fine{gap:2px}
+.preview.fine .cell{min-width:8px;border-radius:3px}
 .preview .cell.hidden{opacity:.18;background:repeating-linear-gradient(45deg,#333 0 4px,#222 4px 8px)!important;box-shadow:none!important}
 .actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px}
 .actions.small{margin-top:10px}
@@ -894,6 +929,8 @@ input[type=color]::-moz-color-swatch{border:2px solid var(--divider-color);borde
 .seg{flex:1 0 34px;height:44px;border-radius:8px;padding:0;font-size:12px;text-shadow:0 0 3px #000;color:#fff;background-image:none;display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1.1}
 .seg.off{background:repeating-linear-gradient(45deg,transparent 0 5px,color-mix(in srgb,var(--divider-color) 60%,transparent) 5px 7px)!important;color:var(--secondary-text-color);text-shadow:none}
 .seg small{font-size:10px;opacity:.9}
+.paint.fine{gap:3px}
+.paint.fine .seg{flex-basis:30px;font-size:11px}
 .geo{display:grid;grid-template-columns:repeat(auto-fill,minmax(26px,1fr));gap:3px}
 .ic{height:30px;padding:0;border-radius:6px;font-size:11px;font-weight:600;position:relative;background:var(--secondary-background-color);opacity:.45}
 .ic.on{opacity:1;background:color-mix(in srgb,var(--primary-color) 30%,var(--secondary-background-color))}

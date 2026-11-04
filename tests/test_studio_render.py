@@ -139,6 +139,50 @@ def test_marquee_tail_dims_towards_the_back_and_travels():
     assert [later[p][0] for p in range(2, 6)] == [64, 128, 191, 255]
 
 
+def test_native_period_divides_the_ring():
+    assert sr.native_period(5, 5, 30) == 10
+    assert sr.native_period(2, 1, 30) == 3
+    assert sr.native_period(4, 3, 30) == 10  # 7 -> 10
+    assert sr.native_period(30, 30, 30) == 30
+
+
+def test_native_static_and_segments_paint_visible_ics_only():
+    g = USER_GEOMETRY  # ICs 1..24 of 30
+    static = sr.native_pattern(sr.Effect(type="static", colors=(B,), playback="native"), g)
+    assert (static.effect, static.speed) == ("clockwise", 0)
+    assert static.colors[:24] == (B,) * 24 and static.colors[24:] == (None,) * 6
+    segs = sr.Effect(type="segments", segments=(R, None, G), levels=(100, 100, 50), playback="native")
+    painted = sr.native_pattern(segs, g)
+    assert painted.colors[:4] == (R, None, (0, 128, 0), None)
+
+
+def test_native_marquee_direction_tail_and_reverse():
+    effect = sr.Effect(type="marquee", colors=(R,), block=5, gap=5, tail=100, speed=60, playback="native")
+    away = sr.native_pattern(effect, USER_GEOMETRY)
+    assert (away.effect, away.speed) == ("clockwise", 60)
+    reds = [c[0] if c else 0 for c in away.colors[:10]]
+    assert reds == [51, 102, 153, 204, 255, 0, 0, 0, 0, 0]  # head leads away from the controller
+    towards = sr.native_pattern(sr.Effect.from_dict({**effect.to_dict(), "direction": "backward"}), USER_GEOMETRY)
+    assert towards.effect == "counter_clockwise"
+    assert [c[0] if c else 0 for c in towards.colors[20:30]] == [0, 0, 0, 0, 0, 255, 204, 153, 102, 51]
+    flipped = sr.Geometry(units=30, first=1, last=24, reverse=True)
+    assert sr.native_pattern(effect, flipped).effect == "counter_clockwise"
+
+
+def test_native_gradient_uses_firmware_blend_and_is_seamless():
+    moving = sr.native_pattern(sr.Effect(type="gradient", colors=(R, B), speed=50, playback="native"), USER_GEOMETRY)
+    assert moving.effect == "gradient" and moving.colors[0] == R and moving.colors[15] == B
+    still = sr.native_pattern(sr.Effect(type="gradient", colors=(R, B), speed=0, playback="native"), USER_GEOMETRY)
+    assert still.colors[0] == R and still.colors[23] == B and still.colors[24] is None
+
+
+def test_native_rejects_what_the_strip_cannot_do():
+    with pytest.raises(sr.StudioValidationError):
+        sr.Effect(type="fade", playback="native")
+    with pytest.raises(sr.StudioValidationError):
+        sr.Effect(type="marquee", direction="center_out", playback="native")
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 def test_panel_preview_matches_python_renderer(tmp_path):
     """panel.js mirrors studio_render.py; the on-screen preview must equal what the strip gets."""
@@ -176,6 +220,40 @@ console.log(JSON.stringify(out));
         py_frame = sr.render(effect, seg, case["t"])
         for pos, colour in py_frame.items():
             assert max(abs(a - b) for a, b in zip(colour, js_frame[str(pos)])) <= 1, (case, pos)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_panel_native_pattern_matches_python(tmp_path):
+    """The panel builds the same per-IC pattern the server uploads."""
+    src = (COMPONENT / "studio_frontend" / "panel.js").read_text(encoding="utf-8")
+    module = tmp_path / "engine.mjs"
+    module.write_text(src.split("// ---------- helpers ----------")[0] + "\nexport { nativePattern };\n", encoding="utf-8")
+    base = {"colors": [[255, 0, 0], [0, 0, 255], [0, 255, 0]], "segments": [list(c) if c else None for c in SEGS],
+            "levels": list(LEVELS), "block": 4, "gap": 3, "tail": 60, "brightness": 80, "background": [0, 0, 0],
+            "playback": "native"}
+    cases = []
+    for reverse in (False, True):
+        for kind, direction, speed in (("static", "forward", 0), ("segments", "forward", 0), ("gradient", "forward", 0),
+                                       ("gradient", "forward", 40), ("marquee", "forward", 70), ("marquee", "backward", 70)):
+            cases.append({**base, "type": kind, "direction": direction, "speed": speed, "reverse": reverse})
+    script = tmp_path / "run.mjs"
+    script.write_text(
+        f"""
+import {{ nativePattern }} from {json.dumps(module.as_uri())};
+const cases = {json.dumps(cases)};
+console.log(JSON.stringify(cases.map(c => nativePattern(c, {{units:30, first:1, last:24, center:null, reverse:c.reverse}}))));
+""",
+        encoding="utf-8",
+    )
+    js = json.loads(subprocess.run(["node", str(script)], check=True, capture_output=True, text=True).stdout)
+    for case, got in zip(cases, js):
+        geometry = sr.Geometry(units=30, first=1, last=24, reverse=case["reverse"])
+        want = sr.native_pattern(sr.Effect.from_dict({k: v for k, v in case.items() if k != "reverse"}), geometry)
+        assert (got["effect"], got["speed"]) == (want.effect, want.speed), case
+        for a, b in zip(got["colors"], want.colors):
+            assert (a is None) == (b is None), case
+            if a is not None:
+                assert max(abs(x - y) for x, y in zip(a, b)) <= 1, case
 
 
 if __name__ == "__main__":
