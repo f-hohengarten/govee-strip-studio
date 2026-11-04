@@ -1,0 +1,25 @@
+{
+  "bootstrap": "effect-studio-bootstrap.js",
+  "chunks": [
+    "effect-studio-advanced-effect-editor-DBPhzen-.js",
+    "effect-studio-checkbox-control-BRcbJ2Y-.js",
+    "effect-studio-colour-picker-DS3J7jxN.js",
+    "effect-studio-core-DjubBMwf.js",
+    "effect-studio-custom-effect-browser-0fRApjS-.js",
+    "effect-studio-custom-effect-editor-BaDohj1I.js",
+    "effect-studio-info-control-DsAgXfqF.js",
+    "effect-studio-info-control-model-DlRcuhyW.js",
+    "effect-studio-music-profile-editor-CapppEhp.js",
+    "effect-studio-painted-segment-editor-Bxas-lDb.js",
+    "effect-studio-palette-editor-DXuzIP-k.js",
+    "effect-studio-scene-browser-CrZ7pjlT.js",
+    "effect-studio-segmented-control-CUN174gm.js",
+    "effect-studio-single-colour-field-DV9xNfiD.js",
+    "effect-studio-slider-control-B2Yw9Nvi.js",
+    "effect-studio-video-profile-editor--s9ovAzJ.js"
+  ],
+  "asset_version": 28,
+  "api_version": 18,
+  "effect_schema_version": 2,
+  "compiler_version": 6
+}
