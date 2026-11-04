@@ -21,9 +21,12 @@ import voluptuous as vol
 from homeassistant.components import frontend, websocket_api
 from homeassistant.components.http.server import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.service import async_extract_referenced_entity_ids
 from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN
@@ -53,7 +56,7 @@ from .studio_render import (
 
 _LOGGER = logging.getLogger(__name__)
 
-STUDIO_VERSION = "0.2.3"
+STUDIO_VERSION = "0.2.4"
 STORE_KEY = f"{DOMAIN}.strip_studio"
 STORE_VERSION = 1
 PANEL_PATH = "strip-studio"
@@ -672,6 +675,81 @@ async def ws_darts_presets(
     )
 
 
+# -- actions for automations ---------------------------------------------------------
+
+
+def _target_entries(hass: HomeAssistant, call: ServiceCall) -> list[str]:
+    """Config entries of the Strip Studio lights an action targets (entities, devices or areas)."""
+    selected = async_extract_referenced_entity_ids(hass, call)
+    registry = er.async_get(hass)
+    entries: list[str] = []
+    for entity_id in sorted(selected.referenced | selected.indirectly_referenced):
+        entity = registry.async_get(entity_id)
+        if (
+            entity is not None
+            and entity.platform == DOMAIN
+            and entity.domain == "light"
+            and entity.config_entry_id
+            and entity.config_entry_id not in entries
+        ):
+            entries.append(entity.config_entry_id)
+    if not entries:
+        raise ServiceValidationError("Choose a light of the Govee Strip Studio integration as target")
+    return entries
+
+
+def _find_effect(studio: StripStudio, wanted: str) -> tuple[str, dict[str, Any]]:
+    """Saved effect by id or by name (case and surrounding spaces ignored)."""
+    effects = studio.data["effects"]
+    if wanted in effects:
+        return wanted, effects[wanted]
+    key = wanted.strip().casefold()
+    for effect_id, item in effects.items():
+        if str(item.get("name", "")).strip().casefold() == key:
+            return effect_id, item
+    names = ", ".join(sorted(str(item.get("name")) for item in effects.values())) or "none"
+    raise ServiceValidationError(f"No Strip Studio effect named '{wanted}'. Saved effects: {names}")
+
+
+async def _service_play(call: ServiceCall) -> None:
+    studio = _studio(call.hass)
+    _effect_id, item = _find_effect(studio, call.data["effect"])
+    effect = Effect.from_dict(item["effect"])
+    for entry_id in _target_entries(call.hass, call):
+        try:
+            await studio.async_play(entry_id, effect, name=item.get("name"))
+        except StudioValidationError as err:
+            raise ServiceValidationError(str(err)) from err
+
+
+async def _service_stop(call: ServiceCall) -> None:
+    studio = _studio(call.hass)
+    for entry_id in _target_entries(call.hass, call):
+        await studio.async_stop(entry_id)
+
+
+async def _service_darts_mode(call: ServiceCall) -> None:
+    studio = _studio(call.hass)
+    config = dict(studio.data["darts"])
+    if call.data["enabled"] and not (config.get("host") and config.get("entry_id")):
+        raise ServiceValidationError("Set up darts in Strip Studio first (darts-caller address and strip)")
+    config["enabled"] = call.data["enabled"]
+    studio.data["darts"] = validate_darts_config(config)
+    await studio.async_save()
+    await studio.darts.async_restart()
+
+
+def _register_services(hass: HomeAssistant) -> None:
+    target = cv.make_entity_service_schema
+    hass.services.async_register(
+        DOMAIN, "play_studio_effect", _service_play, schema=target({vol.Required("effect"): cv.string})
+    )
+    hass.services.async_register(DOMAIN, "stop_studio_effect", _service_stop, schema=target({}))
+    hass.services.async_register(
+        DOMAIN, "set_darts_mode", _service_darts_mode, schema=vol.Schema({vol.Required("enabled"): cv.boolean})
+    )
+
+
 # -- setup ---------------------------------------------------------------------------
 
 
@@ -716,6 +794,7 @@ async def async_setup_strip_studio(hass: HomeAssistant) -> None:
             },
             update=True,
         )
+    _register_services(hass)
     # Connects in the background and keeps retrying, so the strip need not be loaded yet.
     await studio.darts.async_restart()
 

@@ -308,8 +308,13 @@ class GoveeStripStudioPanel extends HTMLElement {
 
   _onStatus(ev) {
     if (ev.darts) {
+      const switched = Boolean(ev.darts.enabled) !== Boolean(this._dartsDraft?.enabled);
       this._info.darts = ev.darts;
-      this._renderDartsStatus();
+      if (switched && !this._dartsDirty) {
+        // Darts mode was switched elsewhere (e.g. by an automation): follow it.
+        this._resetDartsDraft();
+        this._render();
+      } else this._renderDartsStatus();
     }
     if (ev.entry_id !== this._entryId) return;
     this._status = ev.player;

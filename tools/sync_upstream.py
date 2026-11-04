@@ -83,6 +83,7 @@ STUDIO_FILES = [
     "darts_feed.py",
     "darts_rules.py",
     "darts_presets.py",
+    "studio_services.yaml",
     "studio_frontend/panel.js",
 ]
 
@@ -142,6 +143,11 @@ def build(release_zip: Path, version: str) -> None:
             dst = work / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
+
+        # Strip Studio's actions are described in their own file, appended to upstream's.
+        services = work / "services.yaml"
+        studio_services = (work / "studio_services.yaml").read_text(encoding="utf-8")
+        services.write_text(services.read_text(encoding="utf-8").rstrip("\n") + "\n\n" + studio_services, encoding="utf-8")
 
         for cache in work.rglob("__pycache__"):
             shutil.rmtree(cache, ignore_errors=True)

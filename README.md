@@ -48,6 +48,32 @@ Belegung an (Farbe pro Spieler, Regenbogen bei 180, rotes Pulsieren bei Bust …
 Zuordnungen zu überschreiben. Jedes Ereignis wird zusätzlich als
 Home-Assistant-Ereignis `govee_strip_studio_darts` gemeldet – für eigene Automationen.
 
+## Automationen
+
+Gespeicherte Effekte (auch Darts-Effekte) lassen sich in Automationen und Skripten nutzen:
+
+```yaml
+# Effekt per Name abspielen
+action: govee_strip_studio.play_studio_effect
+target:
+  entity_id: light.dart
+data:
+  effect: Abendwelle
+
+# Studio-Effekt beenden
+action: govee_strip_studio.stop_studio_effect
+target:
+  entity_id: light.dart
+
+# Darts-Modus an/aus, z. B. wenn der Autodarts-Rechner hoch- oder herunterfährt
+action: govee_strip_studio.set_darts_mode
+data:
+  enabled: true
+```
+
+Darts-Ereignisse kommen als Ereignis `govee_strip_studio_darts` an (Felder `event`, `player`,
+`player_index`, `game`), z. B. als Auslöser „Ereignis“ mit `event_data: {event: busted}`.
+
 ## Installation über HACS
 
 1. HACS → oben rechts ⋮ → **Benutzerdefinierte Repositories**
