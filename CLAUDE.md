@@ -20,6 +20,7 @@ custom_components/govee_strip_studio/   die Integration (Domain: govee_strip_stu
   studio_darts.py          EIGEN: Autodarts-Steuerung (Ereignis → gespeicherter Effekt, Rücksprung)
   darts_feed.py            EIGEN: Socket.IO-Client für darts-caller (nur aiohttp, kein HA-Import)
   darts_rules.py           EIGEN: reine Ereignis-Klassifikation (kein HA-Import)
+  darts_presets.py         EIGEN: fertige Darts-Effekte + Standard-Zuordnung (kein HA-Import)
   alles andere             UPSTREAM (umbenannt) – nicht direkt bearbeiten, siehe unten
 tools/sync_upstream.py     erzeugt den Fork aus einem Upstream-Release neu
 tests/test_studio_render.py  Tests ohne Home Assistant (pytest), inkl. Python/JS-Parität

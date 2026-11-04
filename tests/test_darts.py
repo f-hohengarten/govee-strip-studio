@@ -1,17 +1,9 @@
-"""Tests for the darts-caller integration (rules and Socket.IO feed), without Home Assistant.
-
-The feed test runs against a real python-socketio server (the library Flask-SocketIO in
-darts-caller is built on).  It is skipped when python-socketio/aiohttp are not installed:
-
-    uvx --python 3.14 --with aiohttp --with python-socketio pytest tests/
-"""
+"""Tests for the darts rules and presets, without Home Assistant (feed: test_darts_feed.py)."""
 
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 from pathlib import Path
-import socket
 import sys
 
 import pytest
@@ -104,124 +96,40 @@ def test_trigger_ids_are_unique():
     assert len(rules.TRIGGERS) == len(set(rules.TRIGGERS))
 
 
-# -- feed against a real Socket.IO server ---------------------------------------------
+# -- presets ---------------------------------------------------------------------------
 
-socketio = pytest.importorskip("socketio")
-aiohttp = pytest.importorskip("aiohttp")
-from aiohttp import web  # noqa: E402
-
-feed_module = _load("darts_feed")
+render = _load("studio_render")
+presets = _load("darts_presets")
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+def test_every_preset_is_a_valid_effect_and_native_ones_loop_seamlessly():
+    geometry = render.Geometry(units=30, first=1, last=24)  # the user's cut strip
+    for effect_id, (name, raw) in presets.PRESETS.items():
+        effect = render.Effect.from_dict(raw)
+        assert name.startswith("Darts · "), effect_id
+        if effect.playback == "native":
+            pattern = render.native_pattern(effect, geometry)
+            assert len(pattern.colors) == 30 and pattern.speed == effect.speed
+            if effect.type == "marquee":
+                assert render.native_period(effect.block, effect.gap, 30) == effect.block + effect.gap, effect_id
+        else:
+            assert render.render(effect, geometry.rescale(15), 0.7), effect_id
 
 
-TOKEN = "eyJhbGciOiJIUzI1NiJ9.e30.c2lnbmF0dXJl"
+def test_preset_rules_point_at_real_triggers_and_presets():
+    for trigger, (effect_id, duration) in presets.PRESET_RULES.items():
+        assert trigger in rules.TRIGGERS and effect_id in presets.PRESETS
+        assert (duration is None) == (trigger in rules.STATE_TRIGGERS), trigger
+        if duration is not None:
+            assert rules.duration_of(trigger, {"effect_id": effect_id, "duration": duration}) == duration
 
 
-async def _serve(port: int, ping_interval: float, *, require_token: bool = False, serve_page: bool = True):
-    """A Socket.IO server; with ``require_token`` it behaves like darts-caller 3."""
-    sio = socketio.AsyncServer(async_mode="aiohttp", ping_interval=ping_interval, ping_timeout=2)
-
-    @sio.event
-    async def connect(sid, environ, auth):
-        if require_token and auth != {"token": TOKEN}:
-            raise socketio.exceptions.ConnectionRefusedError("missing auth token")
-
-    app = web.Application()
-    if require_token and serve_page:
-        page = f'<script>const webAuthToken = "{TOKEN}";</script>'
-
-        async def index(_request):
-            return web.Response(text=page, content_type="text/html")
-
-        app.router.add_get("/", index)
-    sio.attach(app)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", port)
-    await site.start()
-    return sio, runner
-
-
-async def _wait(predicate, timeout=8.0):
-    deadline = asyncio.get_running_loop().time() + timeout
-    while not predicate():
-        if asyncio.get_running_loop().time() > deadline:
-            raise AssertionError("timed out")
-        await asyncio.sleep(0.05)
-
-
-def test_feed_receives_events_keeps_alive_and_reconnects():
-    async def scenario():
-        port = _free_port()
-        sio, runner = await _serve(port, ping_interval=1)
-        received = []
-        async with aiohttp.ClientSession() as session:
-            feed = feed_module.DartsFeed(session, "127.0.0.1", port, received.append)
-            feed.start(asyncio.ensure_future)
-            await _wait(lambda: feed.connected)  # wss fails on a plain server, ws joins
-            assert feed.scheme == "ws"
-            await asyncio.sleep(3.5)  # several ping intervals: pongs must keep the session alive
-            assert feed.connected
-            await sio.emit("message", {"event": "darts-thrown", "playerIndex": "0", "game": {"dartValue": "180"}})
-            await _wait(lambda: received)
-            assert received[0]["game"]["dartValue"] == "180" and feed.last_event == "darts-thrown"
-            # server drops every client -> the feed reconnects on its own
-            for sid in list(sio.manager.get_participants("/", None)):
-                await sio.disconnect(sid[0] if isinstance(sid, tuple) else sid)
-            await _wait(lambda: not feed.connected)
-            await _wait(lambda: feed.connected)
-            await sio.emit("message", {"event": "busted", "playerIndex": "1"})
-            await _wait(lambda: len(received) == 2)
-            await feed.stop()
-        await runner.cleanup()
-
-    asyncio.run(scenario())
-
-
-def test_feed_fetches_the_join_token_like_the_caller_web_ui():
-    async def scenario():
-        port = _free_port()
-        sio, runner = await _serve(port, ping_interval=5, require_token=True)
-        received = []
-        async with aiohttp.ClientSession() as session:
-            feed = feed_module.DartsFeed(session, "127.0.0.1", port, received.append)
-            feed.start(asyncio.ensure_future)
-            await _wait(lambda: feed.connected)
-            await sio.emit("message", {"event": "busted", "playerIndex": "0"})
-            await _wait(lambda: received)
-            await feed.stop()
-        await runner.cleanup()
-
-    asyncio.run(scenario())
-
-
-def test_feed_without_token_is_refused_and_reported():
-    async def scenario():
-        port = _free_port()
-        sio, runner = await _serve(port, ping_interval=5, require_token=True, serve_page=False)
-        async with aiohttp.ClientSession() as session:
-            feed = feed_module.DartsFeed(session, "127.0.0.1", port, lambda _m: None)
-            feed.start(asyncio.ensure_future)
-            await _wait(lambda: feed.error is not None)
-            assert not feed.connected
-            await feed.stop()
-        await runner.cleanup()
-
-    asyncio.run(scenario())
-
-
-def test_feed_reports_unreachable_host():
-    async def scenario():
-        async with aiohttp.ClientSession() as session:
-            feed = feed_module.DartsFeed(session, "127.0.0.1", _free_port(), lambda _m: None)
-            feed.start(asyncio.ensure_future)
-            await _wait(lambda: feed.error is not None)
-            assert not feed.connected
-            await feed.stop()
-
-    asyncio.run(scenario())
+def test_apply_presets_fills_gaps_only_and_is_idempotent():
+    effects = {"mine": {"name": "Mein 180", "effect": {"type": "static"}}}
+    darts_rules = {"visit_180": {"effect_id": "mine", "duration": 9}}
+    added, assigned = presets.apply_presets(effects, darts_rules)
+    assert set(added) == set(presets.PRESETS) and "visit_180" not in assigned
+    assert darts_rules["visit_180"] == {"effect_id": "mine", "duration": 9}  # user's choice kept
+    assert darts_rules["busted"] == {"effect_id": "darts-bust", "duration": 3}
+    assert darts_rules["takeout"] == {"effect_id": "darts-takeout"}
+    assert presets.apply_presets(effects, darts_rules) == ([], [])

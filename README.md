@@ -43,7 +43,9 @@ Autodarts-Login über den angezeigten Code freigeben (einmalig). Für den Autost
 siehe die darts-caller-Anleitung.
 
 Im Strip Studio → Karte **Darts**: IP des Rechners eintragen, „Aktiv“ anhaken, speichern und jedem
-Ereignis einen Effekt zuordnen (▶ testet ohne Werfen). Jedes Ereignis wird zusätzlich als
+Ereignis einen Effekt zuordnen (▶ testet ohne Werfen). „✨ Vorlagen anlegen“ legt eine fertige
+Belegung an (Farbe pro Spieler, Regenbogen bei 180, rotes Pulsieren bei Bust …), ohne eigene
+Zuordnungen zu überschreiben. Jedes Ereignis wird zusätzlich als
 Home-Assistant-Ereignis `govee_strip_studio_darts` gemeldet – für eigene Automationen.
 
 ## Installation über HACS

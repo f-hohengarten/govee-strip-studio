@@ -405,6 +405,26 @@ class GoveeStripStudioPanel extends HTMLElement {
     this._toast("ok", status.enabled ? "Darts-Einstellungen gespeichert – verbinde mit darts-caller …" : "Darts-Einstellungen gespeichert");
   }
 
+  async _installDartsPresets() {
+    if (this._dartsDirty) await this._saveDarts();
+    const ok = confirm(
+      "Fertige Darts-Effekte anlegen (z. B. Regenbogen bei 180, rotes Pulsieren bei Bust, Farbe pro Spieler)?\n\n" +
+        "Sie erscheinen unter „Meine Effekte“ als „Darts · …“ und werden nur Ereignissen zugeordnet, die noch leer sind. Deine eigenen Zuordnungen bleiben unverändert.",
+    );
+    if (!ok) return;
+    const res = await this._call({ type: `${WS}/darts/presets` });
+    this._info.effects = res.effects;
+    this._info.darts = res.darts;
+    this._resetDartsDraft();
+    this._render();
+    this._toast(
+      "ok",
+      res.added.length || res.assigned.length
+        ? `${res.added.length} Effekte angelegt, ${res.assigned.length} Ereignisse belegt – teste sie mit ▶`
+        : "Alle Vorlagen sind schon vorhanden",
+    );
+  }
+
   async _testDarts(trigger) {
     if (this._dartsDirty) await this._saveDarts();
     await this._call({ type: `${WS}/darts/simulate`, trigger });
@@ -466,9 +486,10 @@ class GoveeStripStudioPanel extends HTMLElement {
         }
         <label class="toggle"><input type="checkbox" data-darts="enabled" ${d.enabled ? "checked" : ""}/> Aktiv</label>
         <button class="primary" data-act="darts-save" ${this._dartsDirty ? "" : "disabled"}>Speichern</button>
+        <button data-act="darts-presets" title="Fertige Effekte anlegen und leeren Ereignissen zuordnen">✨ Vorlagen anlegen</button>
       </div>
       <div class="status darts-status"></div>
-      ${effects.length ? "" : `<p class="hint">Speichere zuerst unter „Meine Effekte“ ein paar Effekte – die kannst du hier den Ereignissen zuordnen.</p>`}
+      ${effects.length ? "" : `<p class="hint">Noch keine Effekte gespeichert – mit „✨ Vorlagen anlegen“ bekommst du sofort eine fertige Belegung.</p>`}
       <div class="darts-groups">${this._info.darts_triggers
         .map(([group, items]) => `<div><h3>${group}</h3>${rows(items)}</div>`)
         .join("")}</div>
@@ -940,6 +961,7 @@ class GoveeStripStudioPanel extends HTMLElement {
       dartsDirty();
     });
     on("[data-darts-test]", "click", (ev) => this._testDarts(ev.currentTarget.dataset.dartsTest).catch(() => {}));
+    on("[data-act=darts-presets]", "click", () => this._installDartsPresets().catch(() => {}));
     on("[data-act=darts-save]", "click", () => this._saveDarts().then(() => this._render()).catch(() => {}));
     // geometry
     on("[data-ic]", "click", (ev) => {

@@ -82,6 +82,7 @@ STUDIO_FILES = [
     "studio_darts.py",
     "darts_feed.py",
     "darts_rules.py",
+    "darts_presets.py",
     "studio_frontend/panel.js",
 ]
 
