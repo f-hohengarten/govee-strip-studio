@@ -27,6 +27,8 @@ _spec.loader.exec_module(sr)
 R, G, B, K = (255, 0, 0), (0, 255, 0), (0, 0, 255), (0, 0, 0)
 # The user's strip: H617C, 30 ICs / 15 segments, cut after IC 24 (= 12 segments).
 USER_GEOMETRY = sr.Geometry(units=30, first=1, last=24)
+SEGS = (R, None, B, (10, 200, 30), None, (255, 255, 255), G, (99, 0, 99), None, (255, 128, 0), (1, 2, 3), (200, 200, 0))
+LEVELS = (100, 40, 7, 100, 100, 55, 1, 90, 100, 63, 100, 12)
 
 
 def letters(frame):
@@ -116,6 +118,27 @@ def test_effect_roundtrip_and_validation():
         sr.Geometry(units=30, first=1, last=24, center=25)
 
 
+def test_segment_levels_dim_single_segments():
+    effect = sr.Effect(type="segments", segments=(R, B, None), levels=(100, 50, 100), brightness=100)
+    frame = sr.render(effect, sr.Geometry(units=3), 0)
+    assert frame == {1: R, 2: (0, 0, 128), 3: K}
+    assert sr.Effect.from_dict(json.loads(json.dumps(effect.to_dict()))) == effect
+    with pytest.raises(sr.StudioValidationError):
+        sr.Effect(type="segments", segments=(R,), levels=(0,))
+
+
+def test_marquee_tail_dims_towards_the_back_and_travels():
+    g = sr.Geometry(units=8)
+    effect = sr.Effect(type="marquee", colors=(R,), block=4, gap=4, tail=100, speed=0)
+    frame = sr.render(effect, g, 0)
+    # forward: slot 0..3 lit, head (coordinate 3) brightest, tail end dimmest
+    assert [frame[p][0] for p in range(1, 5)] == [64, 128, 191, 255]
+    assert all(frame[p] == K for p in range(5, 9))
+    moving = sr.Effect(type="marquee", colors=(R,), block=4, gap=4, tail=100, speed=1)
+    later = sr.render(moving, g, 1 / sr.speed_to_units_per_second(1) + 1e-6)
+    assert [later[p][0] for p in range(2, 6)] == [64, 128, 191, 255]
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 def test_panel_preview_matches_python_renderer(tmp_path):
     """panel.js mirrors studio_render.py; the on-screen preview must equal what the strip gets."""
@@ -125,7 +148,7 @@ def test_panel_preview_matches_python_renderer(tmp_path):
     module.write_text(engine + "\nexport { render, rescale };\n", encoding="utf-8")
     cases = []
     for direction in sr.DIRECTIONS:
-        for kind in ("gradient", "fade", "marquee"):
+        for kind in ("gradient", "fade", "marquee", "segments"):
             for t in (0.0, 1.3, 4.7, 11.0):
                 cases.append({"type": kind, "direction": direction, "t": t})
     script = tmp_path / "run.mjs"
@@ -134,8 +157,10 @@ def test_panel_preview_matches_python_renderer(tmp_path):
 import {{ render, rescale }} from {json.dumps(module.as_uri())};
 const cases = {json.dumps(cases)};
 const g = rescale({{units:30, first:1, last:24, center:null, reverse:false}}, 15);
-const out = cases.map(c => render({{type:c.type, colors:[[255,0,0],[0,0,255],[0,255,0]], segments:[], direction:c.direction,
-  speed:37, block:2, gap:1, spread:30, brightness:80, background:[0,0,0]}}, g, c.t));
+const segs = [[255,0,0],null,[0,0,255],[10,200,30],null,[255,255,255],[0,255,0],[99,0,99],null,[255,128,0],[1,2,3],[200,200,0]];
+const levels = [100,40,7,100,100,55,1,90,100,63,100,12];
+const out = cases.map(c => render({{type:c.type, colors:[[255,0,0],[0,0,255],[0,255,0]], segments:segs, levels, direction:c.direction,
+  speed:37, block:3, gap:1, spread:30, brightness:80, background:[0,0,0], tail:70}}, g, c.t));
 console.log(JSON.stringify(out));
 """,
         encoding="utf-8",
@@ -145,7 +170,8 @@ console.log(JSON.stringify(out));
     for case, js_frame in zip(cases, js):
         effect = sr.Effect(
             type=case["type"], colors=(R, B, G), direction=case["direction"],
-            speed=37, block=2, gap=1, spread=30, brightness=80,
+            speed=37, block=3, gap=1, spread=30, brightness=80, tail=70,
+            segments=SEGS, levels=LEVELS,
         )
         py_frame = sr.render(effect, seg, case["t"])
         for pos, colour in py_frame.items():

@@ -132,6 +132,10 @@ class Effect:
     spread: int = 0
     brightness: int = 100
     background: RGB = BLACK
+    # Per-segment brightness in percent, parallel to ``segments`` (missing = 100).
+    levels: tuple[int, ...] = ()
+    # Marquee: how far each block dims from its head to its tail, in percent.
+    tail: int = 0
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -153,6 +157,8 @@ class Effect:
         _int(self.spread, "spread", 0, 100)
         _int(self.brightness, "brightness", 1, 100)
         object.__setattr__(self, "background", _rgb(self.background, "background"))
+        object.__setattr__(self, "levels", tuple(_int(v, "segment brightness", 1, 100) for v in self.levels))
+        _int(self.tail, "tail", 0, 100)
         if self.type == "segments" and not self.segments:
             raise StudioValidationError("a segmented effect needs segment colours")
 
@@ -176,13 +182,18 @@ class Effect:
             "spread": self.spread,
             "brightness": self.brightness,
             "background": list(self.background),
+            "levels": list(self.levels),
+            "tail": self.tail,
         }
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Effect:
         if not isinstance(raw, dict):
             raise StudioValidationError("effect must be an object")
-        known = {"type", "colors", "segments", "direction", "speed", "block", "gap", "spread", "brightness", "background"}
+        known = {
+            "type", "colors", "segments", "direction", "speed", "block", "gap",
+            "spread", "brightness", "background", "levels", "tail",
+        }
         kwargs: dict[str, Any] = {k: raw[k] for k in known if k in raw}
         if "colors" in kwargs:
             kwargs["colors"] = tuple(tuple(c) if isinstance(c, list) else c for c in kwargs["colors"])
@@ -190,6 +201,10 @@ class Effect:
             kwargs["segments"] = tuple(
                 None if c is None else (tuple(c) if isinstance(c, list) else c) for c in kwargs["segments"]
             )
+        if "levels" in kwargs:
+            if not isinstance(kwargs["levels"], (list, tuple)):
+                raise StudioValidationError("segment brightness must be a list")
+            kwargs["levels"] = tuple(kwargs["levels"])
         if "background" in kwargs and isinstance(kwargs["background"], list):
             kwargs["background"] = tuple(kwargs["background"])
         if "type" not in kwargs:
@@ -219,11 +234,14 @@ def _palette_smooth(colors: tuple[RGB, ...], x: float, *, cyclic: bool) -> RGB:
     return _lerp(colors[i], colors[i + 1], x - i)
 
 
+def _dim(color: RGB, f: float) -> RGB:
+    return (round(color[0] * f), round(color[1] * f), round(color[2] * f))
+
+
 def _scale(color: RGB, brightness: int) -> RGB:
     if brightness >= 100:
         return color
-    f = brightness / 100
-    return (round(color[0] * f), round(color[1] * f), round(color[2] * f))
+    return _dim(color, brightness / 100)
 
 
 def speed_to_units_per_second(speed: int) -> float:
@@ -262,8 +280,12 @@ def render(effect: Effect, geometry: Geometry, t: float) -> dict[int, RGB]:
         frame = [effect.colors[0]] * n
     elif effect.type == "segments":
         source = list(effect.segments)
+        levels = effect.levels
         frame = [
-            (source[i] if i < len(source) and source[i] is not None else effect.background) for i in range(n)
+            _scale(source[i], levels[i] if i < len(levels) else 100)
+            if i < len(source) and source[i] is not None
+            else effect.background
+            for i in range(n)
         ]
     else:
         coords = direction_coordinates(geometry, effect.direction)
@@ -296,7 +318,11 @@ def render(effect: Effect, geometry: Geometry, t: float) -> dict[int, RGB]:
                 if within >= effect.block:
                     frame.append(effect.background)
                 else:
-                    frame.append(effect.colors[(slot // period) % ncol])
+                    color = effect.colors[(slot // period) % ncol]
+                    if effect.tail and effect.block > 1:
+                        # The head (largest coordinate, leading the motion) is brightest.
+                        color = _dim(color, 1 - effect.tail / 100 * (effect.block - 1 - within) / effect.block)
+                    frame.append(color)
     return {positions[i]: _scale(frame[i], effect.brightness) for i in range(n)}
 
 

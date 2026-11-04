@@ -16,9 +16,16 @@ const DIRECTIONS = [
   { id: "edges_in", label: "Von den Seiten", glyph: "→←" },
 ];
 const PRESET_COLORS = ["#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#00c7be", "#0a84ff", "#5e5ce6", "#ff2d55", "#ffffff"];
+const TOOLS = [
+  { id: "color", label: "Farbe" },
+  { id: "off", label: "Aus" },
+  { id: "level", label: "Nur Helligkeit" },
+];
 
 // ---------- render engine (mirror of studio_render.py) ----------
 const speedToUnits = (s) => (s <= 0 ? 0 : 0.25 * Math.pow(32, (s - 1) / 99));
+const dim = (c, f) => c.map((v) => Math.round(v * f));
+const scale = (c, pct) => (pct >= 100 ? c : dim(c, pct / 100));
 const lerp = (a, b, t) => [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t));
 function paletteSmooth(colors, x, cyclic) {
   const n = colors.length;
@@ -62,7 +69,10 @@ function render(e, g, t) {
   const n = pos.length;
   let frame = [];
   if (e.type === "static") frame = pos.map(() => e.colors[0]);
-  else if (e.type === "segments") frame = pos.map((_, i) => e.segments[i] || e.background);
+  else if (e.type === "segments") {
+    const levels = e.levels || [];
+    frame = pos.map((_, i) => (e.segments[i] ? scale(e.segments[i], levels[i] ?? 100) : e.background));
+  }
   else {
     const cs = coords(g, e.direction);
     const offset = speedToUnits(e.speed) * t;
@@ -83,7 +93,9 @@ function render(e, g, t) {
         const slot = Math.floor(c + 1e-9) - step;
         const within = ((slot % period) + period) % period;
         if (within >= e.block) return e.background;
-        return e.colors[(((Math.floor(slot / period)) % e.colors.length) + e.colors.length) % e.colors.length];
+        const color = e.colors[(((Math.floor(slot / period)) % e.colors.length) + e.colors.length) % e.colors.length];
+        // The head (largest coordinate, leading the motion) is brightest.
+        return e.tail && e.block > 1 ? dim(color, 1 - ((e.tail / 100) * (e.block - 1 - within)) / e.block) : color;
       });
     }
   }
@@ -103,6 +115,8 @@ const DEFAULT_EFFECT = {
   type: "marquee",
   colors: [[255, 59, 48], [10, 132, 255]],
   segments: [],
+  levels: [],
+  tail: 0,
   direction: "center_out",
   speed: 40,
   block: 2,
@@ -123,6 +137,8 @@ class GoveeStripStudioPanel extends HTMLElement {
     this._geoDirty = false;
     this._live = false;
     this._paintColor = [255, 255, 255];
+    this._tool = "color"; // color | off | level
+    this._brushLevel = 100;
     this._editingId = null;
     this._name = "";
     this._t0 = performance.now();
@@ -186,7 +202,9 @@ class GoveeStripStudioPanel extends HTMLElement {
   _ensureSegments() {
     const n = positions(this._segGeometry()).length;
     const segs = this._effect.segments || [];
+    const levels = this._effect.levels || [];
     this._effect.segments = Array.from({ length: n }, (_, i) => segs[i] || null);
+    this._effect.levels = Array.from({ length: n }, (_, i) => levels[i] ?? 100);
   }
 
   _onStatus(ev) {
@@ -489,23 +507,49 @@ class GoveeStripStudioPanel extends HTMLElement {
   _segmentEditor(sg) {
     const e = this._effect;
     const pos = positions(sg);
+    const tool = this._tool;
     return `<h3>Segmente bemalen</h3>
-      <p class="hint">Farbe wählen, dann Segmente anklicken (Reihenfolge ab Anfang).</p>
-      <div class="palette">
-        ${PRESET_COLORS.map((h) => `<button class="pc ${rgbToHex(this._paintColor) === h ? "sel" : ""}" data-pc="${h}" style="background:${h}"></button>`).join("")}
-        <input type="color" value="${rgbToHex(this._paintColor)}" data-pc-custom/>
-        <button class="pc erase ${this._paintColor === null ? "sel" : ""}" data-pc="erase" title="Radierer">⌫</button>
+      <p class="hint">Werkzeug wählen, dann Segmente anklicken oder mit gedrückter Maus darüberziehen.</p>
+      <div class="brush">
+        <input type="color" value="${rgbToHex(this._paintColor)}" data-brush-color title="Pinselfarbe"/>
+        <div class="tools">${TOOLS.map(
+          (t) => `<button class="${tool === t.id ? "sel" : ""}" data-tool="${t.id}">${t.label}</button>`,
+        ).join("")}</div>
       </div>
-      <div class="paint">${pos
-        .map((_, i) => {
-          const c = e.segments[i];
-          return `<button class="seg" data-paint="${i}" style="background:${c ? css(c) : "transparent"}">${i + 1}</button>`;
-        })
-        .join("")}</div>
+      ${
+        tool === "off"
+          ? ""
+          : `<label class="row"><span>Pinsel-Helligkeit</span><input type="range" min="1" max="100" value="${this._brushLevel}" data-brush-level/><em>${this._brushLevel} %</em></label>`
+      }
+      <div class="paint">${pos.map((_, i) => this._segButton(i)).join("")}</div>
       <div class="actions small">
-        <button data-act="fill-all">Alle füllen</button>
-        <button data-act="clear-all">Alle leeren</button>
+        <button data-act="fill-all">Alle wie Pinsel</button>
+        <button data-act="clear-all">Alle aus</button>
       </div>`;
+  }
+
+  _segButton(i) {
+    const c = this._effect.segments[i];
+    const level = this._effect.levels[i] ?? 100;
+    const bg = c ? css(scale(c, level)) : "transparent";
+    return `<button class="seg ${c ? "" : "off"}" data-paint="${i}" style="background:${bg}"><span>${i + 1}</span>${
+      c && level < 100 ? `<small>${level}%</small>` : ""
+    }</button>`;
+  }
+
+  _paintAt(i) {
+    const e = this._effect;
+    if (this._tool === "off") e.segments[i] = null;
+    else if (this._tool === "level") {
+      if (!e.segments[i]) return;
+      e.levels[i] = this._brushLevel;
+    } else {
+      e.segments[i] = [...this._paintColor];
+      e.levels[i] = this._brushLevel;
+    }
+    const btn = this.shadowRoot.querySelector(`[data-paint="${i}"]`);
+    if (btn) btn.outerHTML = this._segButton(i);
+    this._changed(false);
   }
 
   _sliders() {
@@ -516,9 +560,10 @@ class GoveeStripStudioPanel extends HTMLElement {
     if (e.type === "marquee") {
       rows.push(["block", "Blocklänge", 1, 6, e.block, `${e.block} Seg`]);
       rows.push(["gap", "Lücke", 0, 6, e.gap, `${e.gap} Seg`]);
+      rows.push(["tail", "Ausklingen", 0, 100, e.tail || 0, e.tail ? `${e.tail} %` : "aus"]);
     }
     if (e.type === "fade") rows.push(["spread", "Welle", 0, 100, e.spread, e.spread === 0 ? "ganzer Streifen" : `${e.spread} %`]);
-    rows.push(["brightness", "Helligkeit", 1, 100, e.brightness, `${e.brightness} %`]);
+    rows.push(["brightness", "Gesamt-Helligkeit", 1, 100, e.brightness, `${e.brightness} %`]);
     return `<div class="sliders">${rows
       .map(
         ([k, l, min, max, v, txt]) => `<label class="row"><span>${l}</span><input type="range" min="${min}" max="${max}" value="${v}" data-slider="${k}"/><em>${txt}</em></label>`,
@@ -578,21 +623,65 @@ class GoveeStripStudioPanel extends HTMLElement {
       const v = Number(ev.target.value);
       if (em)
         em.textContent =
-          k === "speed" ? (v === 0 ? "steht" : `${speedToUnits(v).toFixed(1)} Seg/s`) : k === "brightness" || k === "spread" ? (k === "spread" && v === 0 ? "ganzer Streifen" : `${v} %`) : `${v} Seg`;
+          k === "speed"
+            ? v === 0
+              ? "steht"
+              : `${speedToUnits(v).toFixed(1)} Seg/s`
+            : k === "spread" && v === 0
+              ? "ganzer Streifen"
+              : k === "tail" && v === 0
+                ? "aus"
+                : ["brightness", "spread", "tail"].includes(k)
+                  ? `${v} %`
+                  : `${v} Seg`;
       this._changed(false);
     });
-    on("[data-pc]", "click", (ev) => {
-      const v = ev.currentTarget.dataset.pc;
-      this._paintColor = v === "erase" ? null : hexToRgb(v);
+    on("[data-brush-color]", "input", (ev) => {
+      this._paintColor = hexToRgb(ev.target.value);
+      if (this._tool !== "color") {
+        this._tool = "color";
+        this._render();
+      }
+    });
+    on("[data-tool]", "click", (ev) => {
+      this._tool = ev.currentTarget.dataset.tool;
       this._render();
     });
-    on("[data-pc-custom]", "input", (ev) => (this._paintColor = hexToRgb(ev.target.value)));
-    on("[data-paint]", "click", (ev) => {
-      this._effect.segments[Number(ev.currentTarget.dataset.paint)] = this._paintColor ? [...this._paintColor] : null;
-      this._changed();
+    on("[data-brush-level]", "input", (ev) => {
+      this._brushLevel = Number(ev.target.value);
+      ev.target.parentElement.querySelector("em").textContent = `${this._brushLevel} %`;
     });
+    // Click-and-drag painting; works for mouse and touch (no pointer capture, so we hit-test).
+    const paint = r.querySelector(".paint");
+    if (paint) {
+      let last = null;
+      const hit = (ev) => {
+        const el = r.elementFromPoint(ev.clientX, ev.clientY)?.closest("[data-paint]");
+        if (!el) return;
+        const i = Number(el.dataset.paint);
+        if (i !== last) {
+          last = i;
+          this._paintAt(i);
+        }
+      };
+      paint.addEventListener("pointerdown", (ev) => {
+        ev.preventDefault();
+        last = null;
+        this._painting = true;
+        hit(ev);
+      });
+      paint.addEventListener("pointermove", (ev) => this._painting && hit(ev));
+      const end = () => {
+        if (!this._painting) return;
+        this._painting = false;
+        this._changed();
+      };
+      paint.addEventListener("pointerup", end);
+      paint.addEventListener("pointercancel", end);
+      paint.addEventListener("pointerleave", end);
+    }
     on("[data-act=fill-all]", "click", () => {
-      this._effect.segments = this._effect.segments.map(() => (this._paintColor ? [...this._paintColor] : null));
+      this._effect.segments.forEach((_, i) => this._paintAt(i));
       this._changed();
     });
     on("[data-act=clear-all]", "click", () => {
@@ -704,12 +793,12 @@ input[type=color]::-moz-color-swatch{border:2px solid var(--divider-color);borde
 .row{display:grid;grid-template-columns:96px 1fr 110px;align-items:center;gap:10px;font-size:14px}
 .row em{font-style:normal;opacity:.7;font-size:13px;text-align:right}
 .row input[type=range]{width:100%;accent-color:var(--primary-color)}
-.palette{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
-.pc{width:30px;height:30px;border-radius:50%;padding:0}
-.pc.erase{background:var(--secondary-background-color)}
-.palette input[type=color]{width:30px;height:30px}
-.paint{display:flex;gap:4px;flex-wrap:wrap}
-.seg{flex:1 0 34px;height:40px;border-radius:8px;padding:0;font-size:12px;text-shadow:0 0 3px #000;color:#fff;background-image:none}
+.brush{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.tools{display:flex;gap:6px;flex-wrap:wrap}
+.paint{display:flex;gap:4px;flex-wrap:wrap;touch-action:none;user-select:none;-webkit-user-select:none;margin-top:10px}
+.seg{flex:1 0 34px;height:44px;border-radius:8px;padding:0;font-size:12px;text-shadow:0 0 3px #000;color:#fff;background-image:none;display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1.1}
+.seg.off{background:repeating-linear-gradient(45deg,transparent 0 5px,color-mix(in srgb,var(--divider-color) 60%,transparent) 5px 7px)!important;color:var(--secondary-text-color);text-shadow:none}
+.seg small{font-size:10px;opacity:.9}
 .geo{display:grid;grid-template-columns:repeat(auto-fill,minmax(26px,1fr));gap:3px}
 .ic{height:30px;padding:0;border-radius:6px;font-size:11px;font-weight:600;position:relative;background:var(--secondary-background-color);opacity:.45}
 .ic.on{opacity:1;background:color-mix(in srgb,var(--primary-color) 30%,var(--secondary-background-color))}
