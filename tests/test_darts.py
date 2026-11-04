@@ -119,9 +119,26 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-async def _serve(port: int, ping_interval: float):
+TOKEN = "eyJhbGciOiJIUzI1NiJ9.e30.c2lnbmF0dXJl"
+
+
+async def _serve(port: int, ping_interval: float, *, require_token: bool = False, serve_page: bool = True):
+    """A Socket.IO server; with ``require_token`` it behaves like darts-caller 3."""
     sio = socketio.AsyncServer(async_mode="aiohttp", ping_interval=ping_interval, ping_timeout=2)
+
+    @sio.event
+    async def connect(sid, environ, auth):
+        if require_token and auth != {"token": TOKEN}:
+            raise socketio.exceptions.ConnectionRefusedError("missing auth token")
+
     app = web.Application()
+    if require_token and serve_page:
+        page = f'<script>const webAuthToken = "{TOKEN}";</script>'
+
+        async def index(_request):
+            return web.Response(text=page, content_type="text/html")
+
+        app.router.add_get("/", index)
     sio.attach(app)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -160,6 +177,38 @@ def test_feed_receives_events_keeps_alive_and_reconnects():
             await _wait(lambda: feed.connected)
             await sio.emit("message", {"event": "busted", "playerIndex": "1"})
             await _wait(lambda: len(received) == 2)
+            await feed.stop()
+        await runner.cleanup()
+
+    asyncio.run(scenario())
+
+
+def test_feed_fetches_the_join_token_like_the_caller_web_ui():
+    async def scenario():
+        port = _free_port()
+        sio, runner = await _serve(port, ping_interval=5, require_token=True)
+        received = []
+        async with aiohttp.ClientSession() as session:
+            feed = feed_module.DartsFeed(session, "127.0.0.1", port, received.append)
+            feed.start(asyncio.ensure_future)
+            await _wait(lambda: feed.connected)
+            await sio.emit("message", {"event": "busted", "playerIndex": "0"})
+            await _wait(lambda: received)
+            await feed.stop()
+        await runner.cleanup()
+
+    asyncio.run(scenario())
+
+
+def test_feed_without_token_is_refused_and_reported():
+    async def scenario():
+        port = _free_port()
+        sio, runner = await _serve(port, ping_interval=5, require_token=True, serve_page=False)
+        async with aiohttp.ClientSession() as session:
+            feed = feed_module.DartsFeed(session, "127.0.0.1", port, lambda _m: None)
+            feed.start(asyncio.ensure_future)
+            await _wait(lambda: feed.error is not None)
+            assert not feed.connected
             await feed.stop()
         await runner.cleanup()
 

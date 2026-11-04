@@ -7,10 +7,15 @@ speaks just enough of that protocol over aiohttp, which Home Assistant already s
 instead of adding a Socket.IO dependency:
 
     server: 0{"sid":..,"pingInterval":..,"pingTimeout":..}   (Engine.IO open)
-    client: 40                                              (join namespace "/")
+    client: 40{"token":..}                                  (join namespace "/")
     server: 40{"sid":..}                                    (joined)
     server: 2  -> client: 3                                 (ping / pong)
     server: 42["message",{...}]                             (event)
+
+darts-caller 3 only admits clients that present a token.  It renders a fresh one
+(24 h, read scopes) into its own web UI page, which is how that UI connects; this client
+does the same and fetches it again before every connection.  Older callers render no
+token and accept a plain join.
 
 Part of Govee Strip Studio, built on teh-hippo/ha-govee-led-ble (MIT).
 """
@@ -21,6 +26,7 @@ import asyncio
 from collections.abc import Callable
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -29,6 +35,7 @@ import aiohttp
 _LOGGER = logging.getLogger(__name__)
 
 RECONNECT_DELAYS = (2, 5, 10, 30)  # seconds; the last value repeats
+_TOKEN = re.compile(r"""webAuthToken\s*=\s*["']([A-Za-z0-9_\-.]+)["']""")
 
 
 class DartsFeed:
@@ -98,8 +105,9 @@ class DartsFeed:
                 except asyncio.CancelledError:
                     raise
                 except Exception as err:  # noqa: BLE001 - reported in the panel, then retried
-                    error = str(err) or type(err).__name__
-                    _LOGGER.debug("darts-caller %s://%s:%s: %s", scheme, self.host, self.port, error)
+                    message = str(err) or type(err).__name__
+                    error = error or message  # the wss attempt is the usual setup and the more telling error
+                    _LOGGER.debug("darts-caller %s://%s:%s: %s", scheme, self.host, self.port, message)
                 if self._joined:
                     joined = True  # the link worked and then dropped: no need to try the other scheme
                     break
@@ -107,7 +115,19 @@ class DartsFeed:
             self._set(connected=False, error=error)
             await asyncio.sleep(RECONNECT_DELAYS[min(failures, len(RECONNECT_DELAYS) - 1)])
 
+    async def _fetch_token(self, scheme: str) -> str | None:
+        """The join token darts-caller renders into its web UI (None for older callers)."""
+        http = "https" if scheme == "wss" else "http"
+        async with self._session.get(
+            f"{http}://{self.host}:{self.port}/", ssl=False, timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
+            if resp.status != 200:
+                return None
+            match = _TOKEN.search(await resp.text(errors="replace"))
+        return match.group(1) if match else None
+
     async def _session_loop(self, scheme: str) -> None:
+        token = await self._fetch_token(scheme)
         url = f"{scheme}://{self.host}:{self.port}/socket.io/?EIO=4&transport=websocket"
         async with self._session.ws_connect(url, ssl=False, timeout=aiohttp.ClientWSTimeout(ws_close=5), heartbeat=None) as ws:
             opened = await ws.receive_str(timeout=10)
@@ -116,7 +136,7 @@ class DartsFeed:
             info = json.loads(opened[1:])
             # The server pings every pingInterval; silence beyond interval + timeout means a dead link.
             silence = (info.get("pingInterval", 25000) + info.get("pingTimeout", 20000)) / 1000
-            await ws.send_str("40")
+            await ws.send_str("40" + json.dumps({"token": token}) if token else "40")
             self.scheme = scheme
             while True:
                 msg = await ws.receive(timeout=silence)
