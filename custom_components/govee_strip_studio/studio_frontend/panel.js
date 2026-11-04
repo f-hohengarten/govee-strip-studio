@@ -16,6 +16,41 @@ const DIRECTIONS = [
   { id: "edges_in", label: "Von den Seiten", glyph: "→←" },
 ];
 const PRESET_COLORS = ["#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#00c7be", "#0a84ff", "#5e5ce6", "#ff2d55", "#ffffff"];
+// Experiment: patterns painted per IC and played by the strip itself (upstream h617a_painted).
+const NATIVE_EFFECTS = [
+  { id: "clockwise", label: "Vom Controller weg" },
+  { id: "counter_clockwise", label: "Zum Controller hin" },
+  { id: "gradient", label: "Verlauf (Firmware)" },
+  { id: "breathe", label: "Atmen" },
+  { id: "twinkle", label: "Funkeln" },
+  { id: "cycle", label: "Zyklus" },
+];
+const NATIVE_PATTERNS = [
+  { id: "fine", label: "Feinraster", hint: "Jeder sichtbare Chip abwechselnd rot/blau – zähl die Felder." },
+  { id: "tail", label: "Marquee mit Ausklingen", hint: "5 Chips Rot, nach hinten dunkler, dann 5 aus." },
+  { id: "rainbow", label: "Regenbogen", hint: "Weicher Farbverlauf über alle 30 Chips." },
+];
+function hsv(h) {
+  const f = (n) => {
+    const k = (n + h * 6) % 6;
+    return Math.round(255 * (1 - Math.max(0, Math.min(k, 4 - k, 1))));
+  };
+  return [f(5), f(3), f(1)];
+}
+// One colour per physical IC (index 0 = IC 1 at the controller); null = dark.
+function nativePattern(id, icCount, first, last) {
+  return Array.from({ length: icCount }, (_, i) => {
+    const ic = i + 1;
+    if (id === "rainbow") return hsv(i / icCount);
+    if (id === "tail") {
+      const k = i % 10; // period 10 divides 30, so the loop over the hidden ICs is seamless
+      return k < 5 ? dim([255, 0, 0], (k + 1) / 5) : null;
+    }
+    if (ic < first || ic > last) return null;
+    return (ic - first) % 2 ? [0, 0, 255] : [255, 0, 0];
+  });
+}
+
 const TOOLS = [
   { id: "color", label: "Farbe" },
   { id: "off", label: "Aus" },
@@ -138,6 +173,7 @@ class GoveeStripStudioPanel extends HTMLElement {
     this._live = false;
     this._paintColor = [255, 255, 255];
     this._tool = "color"; // color | off | level
+    this._native = { pattern: "fine", effect: "clockwise", speed: 0 };
     this._brushLevel = 100;
     this._editingId = null;
     this._name = "";
@@ -285,6 +321,49 @@ class GoveeStripStudioPanel extends HTMLElement {
     this._render();
   }
 
+  async _sendNative() {
+    const dev = this._device();
+    const n = this._native;
+    const g = this._geometry;
+    await this._stop();
+    const res = await this._call({
+      type: `${DOMAIN}/editor/apply_snapshot`,
+      config_entry_id: this._entryId,
+      name: "Strip Studio Test",
+      updated_at: new Date().toISOString(),
+      content: {
+        kind: "h617a_painted",
+        effect: n.effect,
+        speed: n.speed,
+        brightness: 100,
+        segments: nativePattern(n.pattern, dev.ic_count, g.first, g.last),
+        addressing: "physical_ic",
+      },
+    });
+    const phase = res?.deployment?.phase;
+    this._toast("ok", `Test gesendet${phase ? ` (${phase})` : ""} – beschreib, was der Streifen zeigt`);
+  }
+
+  _nativeCard() {
+    const n = this._native;
+    const pat = NATIVE_PATTERNS.find((p) => p.id === n.pattern);
+    return `<section class="card">
+      <h2>Test: Wiedergabe im Streifen</h2>
+      <p class="hint">Experiment: Das Muster wird pro Chip in den Streifen geladen und läuft dort selbst – ohne Home Assistant im Takt. Ein Druck auf „Auf Streifen abspielen“ oben holt den normalen Modus zurück.</p>
+      <h3>Muster</h3>
+      <div class="tools">${NATIVE_PATTERNS.map(
+        (p) => `<button class="${n.pattern === p.id ? "sel" : ""}" data-nt-pattern="${p.id}">${p.label}</button>`,
+      ).join("")}</div>
+      <p class="hint" style="margin-top:8px">${pat.hint}</p>
+      <h3>Bewegung</h3>
+      <div class="tools">${NATIVE_EFFECTS.map(
+        (e) => `<button class="${n.effect === e.id ? "sel" : ""}" data-nt-effect="${e.id}">${e.label}</button>`,
+      ).join("")}</div>
+      <div class="sliders"><label class="row"><span>Tempo</span><input type="range" min="0" max="100" value="${n.speed}" data-nt-speed/><em>${n.speed}</em></label></div>
+      <div class="actions small"><button class="primary" data-act="native-send">Test senden</button></div>
+    </section>`;
+  }
+
   _changed(rerender = true) {
     this._t0 = performance.now();
     if (rerender) this._render();
@@ -417,6 +496,8 @@ class GoveeStripStudioPanel extends HTMLElement {
               <button class="primary" data-act="geo-save" ${this._geoDirty ? "" : "disabled"}>Speichern</button>
             </div>
           </section>
+
+          ${this._nativeCard()}
 
           <section class="card">
             <h2>Meine Effekte</h2>
@@ -688,6 +769,20 @@ class GoveeStripStudioPanel extends HTMLElement {
       this._effect.segments = this._effect.segments.map(() => null);
       this._changed();
     });
+    // native experiment
+    on("[data-nt-pattern]", "click", (ev) => {
+      this._native.pattern = ev.currentTarget.dataset.ntPattern;
+      this._render();
+    });
+    on("[data-nt-effect]", "click", (ev) => {
+      this._native.effect = ev.currentTarget.dataset.ntEffect;
+      this._render();
+    });
+    on("[data-nt-speed]", "input", (ev) => {
+      this._native.speed = Number(ev.target.value);
+      ev.target.parentElement.querySelector("em").textContent = ev.target.value;
+    });
+    on("[data-act=native-send]", "click", () => this._sendNative().catch(() => {}));
     // geometry
     on("[data-ic]", "click", (ev) => {
       const i = Number(ev.currentTarget.dataset.ic);
