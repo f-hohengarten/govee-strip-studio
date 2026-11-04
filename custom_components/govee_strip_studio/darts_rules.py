@@ -1,0 +1,201 @@
+"""Map darts-caller game events onto Strip Studio triggers.
+
+Pure and dependency-free (tests load it directly).  darts-caller
+(https://github.com/Peschi90/darts-caller) forwards autodarts.io game events as
+Socket.IO ``message`` payloads such as::
+
+    {"event": "dart1-thrown", "playerIndex": "0", "game": {"mode": "X01", "dartValue": "60",
+     "fieldName": "t20", "fieldMultiplier": 3}}
+    {"event": "darts-thrown", "playerIndex": "0", "game": {"dartValue": "180", ...}}
+    {"event": "Board Status", "data": {"status": "Takeout Started"}}
+
+Part of Govee Strip Studio, built on teh-hippo/ha-govee-led-ble (MIT).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+MAX_PLAYERS = 4
+
+# Trigger id -> German label, grouped for the panel.  Order inside a group is the
+# lookup priority: the first configured trigger that matches wins.
+TRIGGER_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    (
+        "Grundzustand",
+        (
+            ("idle", "Bereit (Standard)"),
+            *((f"player_{i}", f"Spieler {i + 1} am Zug") for i in range(MAX_PLAYERS)),
+        ),
+    ),
+    (
+        "Einzelner Dart",
+        (
+            ("dart_bullseye", "Bullseye (50)"),
+            ("dart_bull", "Bull (25)"),
+            ("dart_t20", "Triple 20"),
+            ("dart_triple", "Triple"),
+            ("dart_double", "Double"),
+            ("dart_miss", "Daneben (0)"),
+        ),
+    ),
+    (
+        "Aufnahme (3 Darts)",
+        (
+            ("visit_180", "180"),
+            ("visit_140", "ab 140"),
+            ("visit_100", "ab 100"),
+            ("visit_60", "ab 60"),
+            ("visit_0", "0 Punkte"),
+        ),
+    ),
+    (
+        "Spiel",
+        (
+            ("busted", "Bust"),
+            ("high_finish", "High Finish (ab 100)"),
+            ("game_won", "Leg gewonnen"),
+            ("match_won", "Match gewonnen"),
+            ("match_started", "Match gestartet"),
+            ("match_ended", "Match beendet"),
+        ),
+    ),
+    (
+        "Board",
+        (
+            ("takeout", "Darts ziehen (Takeout)"),
+            ("board_stopped", "Board gestoppt"),
+            ("calibration", "Kalibrierung"),
+        ),
+    ),
+)
+TRIGGERS: tuple[str, ...] = tuple(t for _, items in TRIGGER_GROUPS for t, _ in items)
+
+# Triggers that end on their own (state changes), not after a duration.
+STATE_TRIGGERS = frozenset({"idle", *(f"player_{i}" for i in range(MAX_PLAYERS)), "takeout", "board_stopped", "calibration"})
+DEFAULT_DURATION = 3.0
+HIGH_FINISH = 100
+
+
+@dataclass(frozen=True, slots=True)
+class Reaction:
+    """What the strip should do for one event."""
+
+    kind: str  # "trigger": play a rule | "idle": return to the idle/player effect | "none"
+    candidates: tuple[str, ...] = ()  # trigger ids, most specific first
+    player: str | None = None  # playerIndex the event belongs to, if any
+
+
+NONE = Reaction("none")
+
+
+def _int(value: Any) -> int | None:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _player(msg: dict[str, Any]) -> str | None:
+    value = msg.get("playerIndex")
+    return None if value is None else str(value)
+
+
+def dart_candidates(game: dict[str, Any]) -> tuple[str, ...]:
+    value = _int(game.get("dartValue"))
+    field = str(game.get("fieldName") or "").strip().lower()
+    multiplier = _int(game.get("fieldMultiplier"))
+    if value == 50 or field == "d25":
+        return ("dart_bullseye", "dart_bull")
+    if value == 25 or field == "s25":
+        return ("dart_bull",)
+    if multiplier == 3 or field.startswith("t") or value == 60:  # one dart scores 60 only as T20
+        return ("dart_t20", "dart_triple") if value == 60 or field == "t20" else ("dart_triple",)
+    if multiplier == 2 or field.startswith("d"):
+        return ("dart_double",)
+    if value == 0:
+        return ("dart_miss",)
+    return ()
+
+
+def visit_candidates(score: int | None) -> tuple[str, ...]:
+    if score is None:
+        return ()
+    if score == 180:
+        return ("visit_180", "visit_140", "visit_100", "visit_60")
+    if score >= 140:
+        return ("visit_140", "visit_100", "visit_60")
+    if score >= 100:
+        return ("visit_100", "visit_60")
+    if score >= 60:
+        return ("visit_60",)
+    if score == 0:
+        return ("visit_0",)
+    return ()
+
+
+def react(msg: Any) -> Reaction:
+    """Classify one darts-caller message."""
+    if not isinstance(msg, dict):
+        return NONE
+    event = msg.get("event")
+    player = _player(msg)
+    game = msg.get("game") if isinstance(msg.get("game"), dict) else {}
+    if event in ("dart1-thrown", "dart2-thrown", "dart3-thrown"):
+        return Reaction("trigger", dart_candidates(game), player)
+    if event == "darts-thrown":
+        return Reaction("trigger", visit_candidates(_int(game.get("dartValue"))), player)
+    if event == "busted":
+        return Reaction("trigger", ("busted",), player)
+    if event in ("game-won", "match-won"):
+        won = ("match_won", "game_won") if event == "match-won" else ("game_won",)
+        checkout = _int(game.get("dartsThrownValue"))
+        high = ("high_finish",) if checkout is not None and checkout >= HIGH_FINISH else ()
+        return Reaction("trigger", high + won, player)
+    if event in ("darts-pulled", "game-started"):
+        return Reaction("idle", (), player)
+    if event == "match-started":
+        return Reaction("trigger", ("match_started",), player)
+    if event == "match-ended":
+        return Reaction("trigger", ("match_ended",), None)
+    if event == "Board Status":
+        data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+        status = data.get("status")
+        if status == "Takeout Started":
+            return Reaction("trigger", ("takeout",), player)
+        if status == "Board Stopped":
+            return Reaction("trigger", ("board_stopped",), player)
+        if status == "Calibration Started":
+            return Reaction("trigger", ("calibration",), player)
+        if status in ("Takeout Finished", "Board Started", "Calibration Finished"):
+            return Reaction("idle", (), player)
+    return NONE
+
+
+def idle_candidates(player: str | None) -> tuple[str, ...]:
+    """Idle look for the player whose turn it is, falling back to the general idle."""
+    index = _int(player)
+    if index is not None and 0 <= index < MAX_PLAYERS:
+        return (f"player_{index}", "idle")
+    return ("idle",)
+
+
+def pick(rules: dict[str, Any], candidates: tuple[str, ...]) -> tuple[str, dict[str, Any]] | None:
+    """First candidate with a configured effect."""
+    for trigger in candidates:
+        rule = rules.get(trigger)
+        if isinstance(rule, dict) and rule.get("effect_id"):
+            return trigger, rule
+    return None
+
+
+def duration_of(trigger: str, rule: dict[str, Any]) -> float | None:
+    """Seconds until the idle look returns; None for state triggers (they end on their own)."""
+    if trigger in STATE_TRIGGERS:
+        return None
+    value = rule.get("duration", DEFAULT_DURATION)
+    try:
+        return max(0.5, min(60.0, float(value)))
+    except (TypeError, ValueError):
+        return DEFAULT_DURATION

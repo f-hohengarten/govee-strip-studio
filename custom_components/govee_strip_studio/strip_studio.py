@@ -32,8 +32,12 @@ from .coordinator_status import ParsedMode
 from .effect_catalogue import requires_approved_diy_slot
 from .effect_compiler import DIY_ACK_EVIDENCE, compile_application, resolve_diy_code, validate_compiled_geometry
 from .effect_setup import get_effect_backend
+from .darts_rules import DEFAULT_DURATION, STATE_TRIGGERS, TRIGGER_GROUPS
 from .generated_protocol_adapter import build_power
 from .light_commands import build_segment_color
+from .studio_darts import DEFAULT_CONFIG as DEFAULT_DARTS
+from .studio_darts import DartsController
+from .studio_darts import validate_config as validate_darts_config
 from .studio_render import (
     DIRECTIONS,
     EFFECT_TYPES,
@@ -48,7 +52,7 @@ from .studio_render import (
 
 _LOGGER = logging.getLogger(__name__)
 
-STUDIO_VERSION = "0.1.4"
+STUDIO_VERSION = "0.2.0"
 STORE_KEY = f"{DOMAIN}.strip_studio"
 STORE_VERSION = 1
 PANEL_PATH = "strip-studio"
@@ -99,13 +103,14 @@ class StripStudio:
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
         self.store: Store[dict[str, Any]] = Store(hass, STORE_VERSION, STORE_KEY)
-        self.data: dict[str, Any] = {"geometry": {}, "effects": {}}
+        self.data: dict[str, Any] = {"geometry": {}, "effects": {}, "darts": dict(DEFAULT_DARTS)}
         self.players: dict[str, _Player] = {}
         # Effects the strip is animating by itself (native playback), per entry.
         self.native: dict[str, dict[str, Any]] = {}
         # Live edits while an upload runs: only the newest one is sent next.
         self._native_next: dict[str, tuple[Effect, str | None]] = {}
         self._native_workers: dict[str, asyncio.Task] = {}
+        self.darts = DartsController(self)
         self.listeners: set[Any] = set()
         self._state_unsubs: dict[str, Any] = {}
 
@@ -114,6 +119,8 @@ class StripStudio:
         if isinstance(stored, dict):
             self.data["geometry"] = dict(stored.get("geometry", {}))
             self.data["effects"] = dict(stored.get("effects", {}))
+            if isinstance(stored.get("darts"), dict):
+                self.data["darts"] = validate_darts_config(stored["darts"])
 
     async def async_save(self) -> None:
         await self.store.async_save(self.data)
@@ -172,6 +179,7 @@ class StripStudio:
             "light_entity_id": self.light_entity_id(entry_id),
             "player": player.status() if player else None,
             "native": self.native.get(entry_id),
+            "darts": self.darts.status() if self.data["darts"].get("entry_id") == entry_id else None,
         }
 
     # -- playback ----------------------------------------------------------------
@@ -433,6 +441,10 @@ def ws_info(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg
             "directions": list(DIRECTIONS),
             "devices": devices,
             "effects": studio.data["effects"],
+            "darts": studio.darts.status(),
+            "darts_triggers": [[group, [list(item) for item in items]] for group, items in TRIGGER_GROUPS],
+            "darts_state_triggers": sorted(STATE_TRIGGERS),
+            "darts_default_duration": DEFAULT_DURATION,
         },
     )
 
@@ -587,6 +599,42 @@ async def ws_benchmark(
     connection.send_result(msg["id"], result)
 
 
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{WS}/darts/set", vol.Required("config"): dict}
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_darts_set(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    studio = _studio(hass)
+    try:
+        config = validate_darts_config(msg["config"])
+        if config["entry_id"] is not None:
+            studio.coordinator(config["entry_id"])  # must be a loaded strip
+        studio.data["darts"] = config
+        await studio.async_save()
+        await studio.darts.async_restart()
+    except Exception as err:  # noqa: BLE001
+        _error(connection, msg["id"], err)
+        return
+    connection.send_result(msg["id"], studio.darts.status())
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{WS}/darts/simulate", vol.Required("trigger"): str}
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_darts_simulate(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    try:
+        await _studio(hass).darts.async_simulate(msg["trigger"])
+    except Exception as err:  # noqa: BLE001
+        _error(connection, msg["id"], err)
+        return
+    connection.send_result(msg["id"])
+
+
 # -- setup ---------------------------------------------------------------------------
 
 
@@ -605,6 +653,8 @@ async def async_setup_strip_studio(hass: HomeAssistant) -> None:
         ws_effect_save,
         ws_effect_delete,
         ws_benchmark,
+        ws_darts_set,
+        ws_darts_simulate,
     ):
         websocket_api.async_register_command(hass, handler)
     if _STATIC_DIR.is_dir():
@@ -628,6 +678,8 @@ async def async_setup_strip_studio(hass: HomeAssistant) -> None:
             },
             update=True,
         )
+    # Connects in the background and keeps retrying, so the strip need not be loaded yet.
+    await studio.darts.async_restart()
 
 
 async def async_unload_strip_studio_entry(hass: HomeAssistant, entry_id: str) -> None:

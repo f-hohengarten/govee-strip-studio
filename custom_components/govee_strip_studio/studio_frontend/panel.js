@@ -247,6 +247,7 @@ class GoveeStripStudioPanel extends HTMLElement {
     }
     const dev = this._info.devices[0];
     if (dev) this._selectDevice(dev.entry_id);
+    this._resetDartsDraft();
     this._unsub = this._hass.connection.subscribeMessage((ev) => this._onStatus(ev), { type: `${WS}/subscribe` });
     this._render();
   }
@@ -303,6 +304,10 @@ class GoveeStripStudioPanel extends HTMLElement {
   }
 
   _onStatus(ev) {
+    if (ev.darts) {
+      this._info.darts = ev.darts;
+      this._renderDartsStatus();
+    }
     if (ev.entry_id !== this._entryId) return;
     this._status = ev.player;
     const idx = this._info.devices.findIndex((d) => d.entry_id === ev.entry_id);
@@ -378,6 +383,96 @@ class GoveeStripStudioPanel extends HTMLElement {
     this._name = "";
     this._ensureSegments();
     this._render();
+  }
+
+  // ---------- darts (Autodarts via darts-caller) ----------
+  _resetDartsDraft() {
+    const d = this._info.darts || {};
+    this._dartsDraft = {
+      enabled: Boolean(d.enabled),
+      host: d.host || "",
+      port: d.port || 8079,
+      entry_id: d.entry_id || this._entryId,
+      rules: clone(d.rules || {}),
+    };
+    this._dartsDirty = false;
+  }
+
+  async _saveDarts() {
+    const status = await this._call({ type: `${WS}/darts/set`, config: this._dartsDraft });
+    this._info.darts = status;
+    this._resetDartsDraft();
+    this._toast("ok", status.enabled ? "Darts-Einstellungen gespeichert – verbinde mit darts-caller …" : "Darts-Einstellungen gespeichert");
+  }
+
+  async _testDarts(trigger) {
+    if (this._dartsDirty) await this._saveDarts();
+    await this._call({ type: `${WS}/darts/simulate`, trigger });
+  }
+
+  _renderDartsStatus() {
+    const el = this.shadowRoot.querySelector(".darts-status");
+    if (!el) return;
+    const d = this._info.darts || {};
+    const feed = d.feed;
+    if (!d.enabled || !feed) {
+      el.innerHTML = `<span class="dot off"></span> Aus`;
+      return;
+    }
+    const label = this._info.darts_triggers.flatMap(([, items]) => items).find(([id]) => id === d.active)?.[1];
+    const last = feed.last_event ? ` · letztes Ereignis: ${feed.last_event} (vor ${Math.round(feed.last_event_age)} s)` : "";
+    el.innerHTML = feed.connected
+      ? `<span class="dot on"></span> Verbunden mit darts-caller${last}${label ? ` · zeigt: <b>${label}</b>` : ""}`
+      : `<span class="dot off"></span> <span class="warn">Nicht verbunden${feed.error ? `: ${feed.error}` : ""}</span> – neuer Versuch läuft`;
+  }
+
+  _dartsCard() {
+    const d = this._dartsDraft;
+    const effects = Object.entries(this._info.effects || {});
+    const stateTriggers = new Set(this._info.darts_state_triggers || []);
+    const devices = this._info.devices;
+    const options = (selected) =>
+      `<option value="">— nichts —</option>` +
+      effects.map(([id, item]) => `<option value="${id}" ${id === selected ? "selected" : ""}>${item.name}</option>`).join("");
+    const rows = (items) =>
+      items
+        .map(([id, label]) => {
+          const rule = d.rules[id] || {};
+          const timed = !stateTriggers.has(id);
+          return `<div class="darts-row">
+            <span>${label}</span>
+            <select data-darts-effect="${id}">${options(rule.effect_id)}</select>
+            ${
+              timed
+                ? `<label class="dur"><input type="number" min="0.5" max="60" step="0.5" value="${rule.duration ?? this._info.darts_default_duration}" data-darts-duration="${id}" ${rule.effect_id ? "" : "disabled"}/> s</label>`
+                : `<span class="dur muted">bleibt</span>`
+            }
+            <button data-darts-test="${id}" title="Testen" ${rule.effect_id ? "" : "disabled"}>▶</button>
+          </div>`;
+        })
+        .join("");
+    return `<section class="card wide">
+      <h2>Darts</h2>
+      <p class="hint">Strip Studio hört bei <b>darts-caller</b> auf deinem Autodarts-Rechner mit und spielt je nach Wurf deine gespeicherten Effekte. Kurze Effekte springen nach der eingestellten Zeit zurück auf die Farbe des Spielers am Zug.</p>
+      <div class="darts-conn">
+        <label>Rechner <input class="text" data-darts="host" placeholder="192.168.1.130" value="${d.host}"/></label>
+        <label>Port <input class="text port" type="number" data-darts="port" value="${d.port}"/></label>
+        ${
+          devices.length > 1
+            ? `<label>Streifen <select data-darts="entry_id">${devices
+                .map((x) => `<option value="${x.entry_id}" ${x.entry_id === d.entry_id ? "selected" : ""}>${x.title}</option>`)
+                .join("")}</select></label>`
+            : ""
+        }
+        <label class="toggle"><input type="checkbox" data-darts="enabled" ${d.enabled ? "checked" : ""}/> Aktiv</label>
+        <button class="primary" data-act="darts-save" ${this._dartsDirty ? "" : "disabled"}>Speichern</button>
+      </div>
+      <div class="status darts-status"></div>
+      ${effects.length ? "" : `<p class="hint">Speichere zuerst unter „Meine Effekte“ ein paar Effekte – die kannst du hier den Ereignissen zuordnen.</p>`}
+      <div class="darts-groups">${this._info.darts_triggers
+        .map(([group, items]) => `<div><h3>${group}</h3>${rows(items)}</div>`)
+        .join("")}</div>
+    </section>`;
   }
 
   _changed(rerender = true) {
@@ -538,7 +633,7 @@ class GoveeStripStudioPanel extends HTMLElement {
             </div>
           </section>
 
-          <section class="card">
+          <section class="card wide">
             <h2>Meine Effekte</h2>
             <div class="save-row">
               <input class="name" placeholder="Name, z. B. Abendwelle" value="${(this._name || "").replace(/"/g, "&quot;")}" maxlength="40"/>
@@ -565,10 +660,13 @@ class GoveeStripStudioPanel extends HTMLElement {
                 : `<p class="hint">Noch keine Effekte gespeichert.</p>`
             }</div>
           </section>
+
+          ${this._dartsCard()}
         </div>
       </div>`;
     this._bind();
     this._renderStatus();
+    this._renderDartsStatus();
     this._drawPreview();
   }
 
@@ -818,6 +916,31 @@ class GoveeStripStudioPanel extends HTMLElement {
       this._effect.segments = this._effect.segments.map(() => null);
       this._changed();
     });
+    // darts
+    const dartsDirty = () => {
+      this._dartsDirty = true;
+      const btn = r.querySelector("[data-act=darts-save]");
+      if (btn) btn.disabled = false;
+    };
+    on("[data-darts]", "change", (ev) => {
+      const k = ev.target.dataset.darts;
+      this._dartsDraft[k] = k === "enabled" ? ev.target.checked : k === "port" ? Number(ev.target.value) : ev.target.value.trim();
+      dartsDirty();
+    });
+    on("[data-darts-effect]", "change", (ev) => {
+      const id = ev.target.dataset.dartsEffect;
+      if (ev.target.value) this._dartsDraft.rules[id] = { ...(this._dartsDraft.rules[id] || {}), effect_id: ev.target.value };
+      else delete this._dartsDraft.rules[id];
+      dartsDirty();
+      this._render();
+    });
+    on("[data-darts-duration]", "change", (ev) => {
+      const rule = this._dartsDraft.rules[ev.target.dataset.dartsDuration];
+      if (rule) rule.duration = Number(ev.target.value);
+      dartsDirty();
+    });
+    on("[data-darts-test]", "click", (ev) => this._testDarts(ev.currentTarget.dataset.dartsTest).catch(() => {}));
+    on("[data-act=darts-save]", "click", () => this._saveDarts().then(() => this._render()).catch(() => {}));
     // geometry
     on("[data-ic]", "click", (ev) => {
       const i = Number(ev.currentTarget.dataset.ic);
@@ -880,7 +1003,19 @@ header{display:flex;align-items:center;gap:12px;height:56px;position:sticky;top:
 select.device{margin-left:auto;padding:6px 10px;border-radius:8px;background:var(--card-background-color);color:inherit;border:1px solid var(--divider-color)}
 .card{background:var(--ha-card-background,var(--card-background-color));border-radius:var(--ha-card-border-radius,16px);padding:16px 18px;box-shadow:var(--ha-card-box-shadow,none);border:1px solid var(--ha-card-border-color,var(--divider-color))}
 .grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:16px;margin-top:16px}
-.grid > .card:last-child{grid-column:1 / -1}
+.grid > .card.wide,.grid > .card:last-child{grid-column:1 / -1}
+.darts-conn{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:10px;font-size:14px}
+.darts-conn label{display:flex;align-items:center;gap:6px}
+.darts-conn .text,.darts-row select,.darts-conn select{padding:7px 10px;border-radius:8px;border:1px solid var(--divider-color);background:var(--secondary-background-color);color:inherit;font:inherit}
+.darts-conn .text{width:160px}
+.darts-conn .port{width:80px}
+.darts-groups{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:4px 24px}
+.darts-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr) 76px 36px;gap:8px;align-items:center;font-size:14px;margin-bottom:6px}
+.darts-row select{min-width:0}
+.darts-row .dur{display:flex;align-items:center;gap:4px;font-size:13px}
+.darts-row .dur input{width:52px;padding:6px;border-radius:8px;border:1px solid var(--divider-color);background:var(--secondary-background-color);color:inherit}
+.darts-row .muted{opacity:.55}
+.darts-row button{padding:6px 0}
 @media (max-width:900px){.grid{grid-template-columns:1fr}}
 h2{font-size:17px;margin:0 0 12px;font-weight:500}
 h3{font-size:13px;text-transform:uppercase;letter-spacing:.06em;opacity:.65;margin:18px 0 8px;font-weight:500}

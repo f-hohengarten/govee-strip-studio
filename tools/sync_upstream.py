@@ -76,7 +76,14 @@ PATCHES: dict[str, list[tuple[str, str]]] = {
 }
 
 # Files owned by this fork (copied over the rebuilt upstream tree).
-STUDIO_FILES = ["strip_studio.py", "studio_render.py", "studio_frontend/panel.js"]
+STUDIO_FILES = [
+    "strip_studio.py",
+    "studio_render.py",
+    "studio_darts.py",
+    "darts_feed.py",
+    "darts_rules.py",
+    "studio_frontend/panel.js",
+]
 
 
 def _replace_once(text: str, old: str, new: str, where: str) -> str:

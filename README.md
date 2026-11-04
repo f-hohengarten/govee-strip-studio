@@ -22,6 +22,30 @@ deshalb in ruhigen Schritten (etwa 2–5 pro Sekunde, abhängig von der Zahl der
 
 Die Bluetooth-Verbindung wird standardmäßig gehalten („hold“), damit Befehle schnell ankommen.
 
+## Darts (Autodarts)
+
+Strip Studio kann auf Autodarts-Spiele reagieren: Würfe, Aufnahmen, Bust, Leg-/Match-Gewinn,
+Takeout und Spielerwechsel lösen deine gespeicherten Effekte aus. Kurze Effekte springen nach
+der eingestellten Zeit zurück auf die Farbe des Spielers am Zug.
+
+Die Ereignisse liefert [darts-caller](https://github.com/Peschi90/darts-caller), das auf dem
+Autodarts-Rechner läuft (Ubuntu, Raspberry Pi, Windows …):
+
+```bash
+sudo mkdir -p /opt/darts-caller/media /opt/darts-caller/media-shared && cd /opt/darts-caller
+sudo curl -L -o darts-caller https://github.com/Peschi90/darts-caller/releases/latest/download/darts-caller-linux
+sudo chmod +x darts-caller
+sudo ./darts-caller -B DEINE_BOARD_ID -M /opt/darts-caller/media -MS /opt/darts-caller/media-shared
+```
+
+Danach `https://IP-DES-RECHNERS:8079` im Browser öffnen, Zertifikatswarnung bestätigen und den
+Autodarts-Login über den angezeigten Code freigeben (einmalig). Für den Autostart als Dienst
+siehe die darts-caller-Anleitung.
+
+Im Strip Studio → Karte **Darts**: IP des Rechners eintragen, „Aktiv“ anhaken, speichern und jedem
+Ereignis einen Effekt zuordnen (▶ testet ohne Werfen). Jedes Ereignis wird zusätzlich als
+Home-Assistant-Ereignis `govee_strip_studio_darts` gemeldet – für eigene Automationen.
+
 ## Installation über HACS
 
 1. HACS → oben rechts ⋮ → **Benutzerdefinierte Repositories**
@@ -45,5 +69,6 @@ MIT – siehe [LICENSE](LICENSE) und [NOTICE.md](NOTICE.md).
 ## Entwicklung
 
 - Projektregeln: [CLAUDE.md](CLAUDE.md)
-- Tests (ohne Home Assistant): `python3 -m pytest tests/ -q`
+- Tests (ohne Home Assistant): `python3 -m pytest tests/ -q` – der Darts-Feed-Test braucht
+  zusätzlich `aiohttp` und `python-socketio` (sonst übersprungen)
 - Upstream-Update übernehmen: `python3 tools/sync_upstream.py vX.Y.Z`
