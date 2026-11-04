@@ -133,3 +133,4 @@ def test_apply_presets_fills_gaps_only_and_is_idempotent():
     assert darts_rules["busted"] == {"effect_id": "darts-bust", "duration": 3}
     assert darts_rules["takeout"] == {"effect_id": "darts-takeout"}
     assert presets.apply_presets(effects, darts_rules) == ([], [])
+    assert all(effects[i]["group"] == presets.DARTS_GROUP for i in presets.PRESETS) and "group" not in effects["mine"]

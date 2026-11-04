@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+DARTS_GROUP = "darts"  # library group: shown with the darts settings, not under "Meine Effekte"
+
 RED, GREEN, BLUE = [255, 0, 0], [0, 200, 40], [10, 90, 255]
 GOLD, ORANGE, WHITE = [255, 170, 0], [255, 90, 0], [255, 255, 255]
 CYAN, MAGENTA, PURPLE, BLACK = [0, 200, 255], [255, 0, 160], [150, 40, 255], [0, 0, 0]
@@ -90,7 +92,7 @@ def apply_presets(effects: dict[str, Any], rules: dict[str, Any]) -> tuple[list[
     added: list[str] = []
     for effect_id, (name, effect) in PRESETS.items():
         if effect_id not in effects:
-            effects[effect_id] = {"name": name, "effect": effect}
+            effects[effect_id] = {"name": name, "effect": effect, "group": DARTS_GROUP}
             added.append(effect_id)
     assigned: list[str] = []
     for trigger, (effect_id, duration) in PRESET_RULES.items():

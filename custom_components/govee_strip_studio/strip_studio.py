@@ -32,7 +32,7 @@ from .coordinator_status import ParsedMode
 from .effect_catalogue import requires_approved_diy_slot
 from .effect_compiler import DIY_ACK_EVIDENCE, compile_application, resolve_diy_code, validate_compiled_geometry
 from .effect_setup import get_effect_backend
-from .darts_presets import apply_presets
+from .darts_presets import DARTS_GROUP, PRESETS, apply_presets
 from .darts_rules import DEFAULT_DURATION, STATE_TRIGGERS, TRIGGER_GROUPS
 from .generated_protocol_adapter import build_power
 from .light_commands import build_segment_color
@@ -53,7 +53,7 @@ from .studio_render import (
 
 _LOGGER = logging.getLogger(__name__)
 
-STUDIO_VERSION = "0.2.2"
+STUDIO_VERSION = "0.2.3"
 STORE_KEY = f"{DOMAIN}.strip_studio"
 STORE_VERSION = 1
 PANEL_PATH = "strip-studio"
@@ -120,6 +120,10 @@ class StripStudio:
         if isinstance(stored, dict):
             self.data["geometry"] = dict(stored.get("geometry", {}))
             self.data["effects"] = dict(stored.get("effects", {}))
+            for effect_id, item in self.data["effects"].items():
+                # Presets installed before effects had groups (0.2.2) are darts effects.
+                if effect_id in PRESETS and isinstance(item, dict) and "group" not in item:
+                    item["group"] = DARTS_GROUP
             if isinstance(stored.get("darts"), dict):
                 self.data["darts"] = validate_darts_config(stored["darts"])
 
@@ -547,6 +551,7 @@ async def ws_stop(hass: HomeAssistant, connection: websocket_api.ActiveConnectio
         vol.Optional("effect_id"): str,
         vol.Required("name"): vol.All(str, vol.Length(min=1, max=40)),
         vol.Required("effect"): dict,
+        vol.Optional("group"): vol.Any(None, vol.In([DARTS_GROUP])),
     }
 )
 @websocket_api.require_admin
@@ -558,7 +563,10 @@ async def ws_effect_save(
     try:
         effect = Effect.from_dict(msg["effect"])
         effect_id = msg.get("effect_id") or uuid.uuid4().hex[:12]
-        studio.data["effects"][effect_id] = {"name": msg["name"].strip(), "effect": effect.to_dict()}
+        item: dict[str, Any] = {"name": msg["name"].strip(), "effect": effect.to_dict()}
+        if msg.get("group"):
+            item["group"] = msg["group"]
+        studio.data["effects"][effect_id] = item
         await studio.async_save()
     except Exception as err:  # noqa: BLE001
         _error(connection, msg["id"], err)
