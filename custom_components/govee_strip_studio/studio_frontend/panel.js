@@ -579,18 +579,26 @@ class GoveeStripStudioPanel extends HTMLElement {
     const root = this.shadowRoot;
     const cells = root.querySelectorAll(".preview .cell");
     if (!cells.length || !this._device()) return;
+    const dev = this._device();
     const t = (performance.now() - this._t0) / 1000;
-    let frame;
+    // One cell per visible IC.  Native frames are per IC already; Home Assistant frames are
+    // per segment, and every IC of a segment shows that segment's colour (as on the strip).
+    let colorOf;
     try {
-      frame = this._native() ? nativeFrame(this._effect, this._unitGeometry(), t) : render(this._effect, this._segGeometry(), t);
+      if (this._native()) {
+        const frame = nativeFrame(this._effect, this._unitGeometry(), t);
+        colorOf = (ic) => frame[ic];
+      } else {
+        const frame = render(this._effect, this._segGeometry(), t);
+        colorOf = (ic) => frame[Math.ceil((ic * dev.segment_count) / dev.ic_count)];
+      }
     } catch (e) {
       return;
     }
     cells.forEach((cell) => {
-      const seg = Number(cell.dataset.seg);
-      const c = frame[seg];
+      const c = colorOf(Number(cell.dataset.ic));
       cell.style.background = c ? css(c) : "transparent";
-      cell.style.boxShadow = c && (c[0] + c[1] + c[2]) > 30 ? `0 0 14px 2px ${css(c)}` : "none";
+      cell.style.boxShadow = c && c[0] + c[1] + c[2] > 30 ? `0 0 10px 1px ${css(c)}` : "none";
     });
   }
 
@@ -661,7 +669,7 @@ class GoveeStripStudioPanel extends HTMLElement {
             <span class="ctrl">● Controller</span>
             <span class="status"></span>
           </div>
-          <div class="preview ${native ? "fine" : ""}">${this._previewCells(ug)}</div>
+          <div class="preview">${this._previewCells()}</div>
           <div class="actions">
             <button class="primary" data-act="play">▶ Auf Streifen abspielen</button>
             <button data-act="stop">■ Stopp</button>
@@ -751,13 +759,11 @@ class GoveeStripStudioPanel extends HTMLElement {
     return (cols.length ? cols : [[40, 40, 40]]).map((c) => `<i style="background:${css(c)}"></i>`).join("");
   }
 
-  _previewCells(g) {
-    const vis = new Set(positions(g));
-    const unit = this._native() ? "Chip" : "Segment";
+  // Only the ICs that physically exist (geometry first..last), in order from the controller.
+  _previewCells() {
+    const { first, last } = this._geometry;
     let out = "";
-    for (let s = 1; s <= g.units; s++) {
-      out += `<div class="cell ${vis.has(s) ? "" : "hidden"}" data-seg="${s}" title="${unit} ${s}"></div>`;
-    }
+    for (let ic = first; ic <= last; ic++) out += `<div class="cell" data-ic="${ic}" title="Chip ${ic}"></div>`;
     return out;
   }
 
@@ -1125,11 +1131,8 @@ button.sel{border-color:var(--primary-color);box-shadow:0 0 0 1px var(--primary-
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:middle}
 .dot.on{background:var(--success-color,#34c759);box-shadow:0 0 8px var(--success-color,#34c759)}
 .dot.off{background:var(--disabled-text-color,#888)}
-.preview{display:flex;gap:4px;padding:18px 14px;background:#0b0b0e;border-radius:12px;overflow-x:auto}
-.preview .cell{flex:1 1 0;min-width:18px;height:28px;border-radius:6px;transition:background .12s}
-.preview.fine{gap:2px}
-.preview.fine .cell{min-width:8px;border-radius:3px}
-.preview .cell.hidden{opacity:.18;background:repeating-linear-gradient(45deg,#333 0 4px,#222 4px 8px)!important;box-shadow:none!important}
+.preview{display:flex;gap:3px;padding:18px 14px;background:#0b0b0e;border-radius:12px}
+.preview .cell{flex:1 1 0;min-width:0;height:28px;border-radius:4px;transition:background .12s}
 .actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px}
 .actions.small{margin-top:10px}
 .toggle{display:flex;align-items:center;gap:6px;font-size:14px;cursor:pointer}
