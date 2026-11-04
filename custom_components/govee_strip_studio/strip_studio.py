@@ -25,12 +25,14 @@ from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.storage import Store
-from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
-from .effect_compiler import compile_application, resolve_diy_code
-from .effect_deployments import DeploymentPhase
+from .control_arbiter import ControlIntent
+from .coordinator_status import ParsedMode
+from .effect_catalogue import requires_approved_diy_slot
+from .effect_compiler import DIY_ACK_EVIDENCE, compile_application, resolve_diy_code, validate_compiled_geometry
 from .effect_setup import get_effect_backend
+from .generated_protocol_adapter import build_power
 from .light_commands import build_segment_color
 from .studio_render import (
     DIRECTIONS,
@@ -46,7 +48,7 @@ from .studio_render import (
 
 _LOGGER = logging.getLogger(__name__)
 
-STUDIO_VERSION = "0.1.3"
+STUDIO_VERSION = "0.1.4"
 STORE_KEY = f"{DOMAIN}.strip_studio"
 STORE_VERSION = 1
 PANEL_PATH = "strip-studio"
@@ -101,6 +103,9 @@ class StripStudio:
         self.players: dict[str, _Player] = {}
         # Effects the strip is animating by itself (native playback), per entry.
         self.native: dict[str, dict[str, Any]] = {}
+        # Live edits while an upload runs: only the newest one is sent next.
+        self._native_next: dict[str, tuple[Effect, str | None]] = {}
+        self._native_workers: dict[str, asyncio.Task] = {}
         self.listeners: set[Any] = set()
         self._state_unsubs: dict[str, Any] = {}
 
@@ -189,6 +194,15 @@ class StripStudio:
         """
         if effect.playback == "native":
             await self.async_stop(entry_id, notify=False)
+            if live:
+                self._native_next[entry_id] = (effect, name)
+                worker = self._native_workers.get(entry_id)
+                if worker is None or worker.done():
+                    self._native_workers[entry_id] = self.hass.async_create_background_task(
+                        self._native_worker(entry_id), f"{DOMAIN} strip studio upload {entry_id}"
+                    )
+                return
+            self._native_next.pop(entry_id, None)  # an explicit play supersedes queued live edits
             await self._async_apply_native(entry_id, effect, name)
             self.native[entry_id] = {"name": name, "effect": effect.to_dict()}
             self._notify(entry_id)
@@ -211,16 +225,33 @@ class StripStudio:
         self._watch_light(entry_id)
         self._notify(entry_id)
 
+    async def _native_worker(self, entry_id: str) -> None:
+        while (queued := self._native_next.pop(entry_id, None)) is not None:
+            effect, name = queued
+            status: dict[str, Any] = {"name": name, "effect": effect.to_dict()}
+            try:
+                await self._async_apply_native(entry_id, effect, name)
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001 - reported through the status stream
+                status["error"] = str(err) or type(err).__name__
+            self.native[entry_id] = status
+            self._notify(entry_id)
+
     async def _async_apply_native(self, entry_id: str, effect: Effect, name: str | None) -> None:
         """Upload a per-IC painted pattern; the strip then animates it on its own.
 
-        Mirrors upstream's ``editor/apply_snapshot`` handler (compile, supersede previews,
-        apply) so deployment bookkeeping stays consistent with the expert editor.
+        Uses upstream's compiler and its effect-sequence writer (reconnects, retries,
+        waits for the upload ACK) but not its deployment engine: that engine reads the
+        full device state before every apply and reads it back afterwards, which costs
+        several round trips per edit and fails outright when the link has dropped.
         """
         backend = get_effect_backend(self.hass)
         if backend is None:
             raise StudioValidationError("the effect backend of this integration is not available")
         coordinator = self.coordinator(entry_id)
+        if requires_approved_diy_slot(coordinator.model):
+            raise StudioValidationError("this device needs the expert editor for on-strip effects")
         geometry = self.geometry(entry_id)
         if geometry.units != coordinator.profile.physical_ic_count:
             raise StudioValidationError("this device does not report its IC count")
@@ -237,17 +268,34 @@ class StripStudio:
             },
         )
         diy_code = resolve_diy_code(item, None, model=coordinator.model, profile=coordinator.profile)
-        compile_application(item, coordinator.model, diy_code=diy_code, profile=coordinator.profile)
+        compiled = compile_application(item, coordinator.model, diy_code=diy_code, profile=coordinator.profile)
         await backend.preview.async_supersede_device(entry_id, reason="committed_apply")
-        result = await backend.engine.async_apply_snapshot(
-            coordinator,
-            item,
-            config_entry_id=entry_id,
-            updated_at=dt_util.utcnow().isoformat(),
-            diy_code=diy_code,
+
+        def guard() -> None:
+            validate_compiled_geometry(compiled, coordinator.profile)
+
+        if not coordinator.is_on:
+            await coordinator.send_command(build_power(True, coordinator.model), write_guard=guard)
+            coordinator.is_on = True
+        options: dict[str, Any] = {}
+        if DIY_ACK_EVIDENCE in compiled.evidence_codes:
+            options = {"require_upload_ack": True, "upload_ack_index": len(compiled.upload_packets) - 1}
+        final = compiled.activation_packet if compiled.upload_transport == "a1_02" else None
+        if final is not None:
+            options["final_packet"] = final
+        await coordinator.async_write_effect_sequence(
+            compiled.upload_packets if final is not None else compiled.packets,
+            intent=ControlIntent.APPLY,
+            write_guard=guard,
+            **options,
         )
-        if result.phase is DeploymentPhase.FAILED:
-            raise StudioValidationError(f"the strip rejected the pattern ({result.error_code or 'unknown error'})")
+        # Same optimistic mode bookkeeping as upstream after a DIY activation.
+        coordinator.color_mode = ParsedMode.DIY
+        coordinator._scene_code = None
+        coordinator.effect = None
+        coordinator.diy_code = compiled.diy_code
+        coordinator.music_mode = coordinator.video_mode = "off"
+        coordinator.async_update_listeners()
 
     async def async_stop(self, entry_id: str, *, notify: bool = True) -> None:
         player = self.players.get(entry_id)
@@ -589,5 +637,8 @@ async def async_unload_strip_studio_entry(hass: HomeAssistant, entry_id: str) ->
     await studio.async_stop(entry_id, notify=False)
     studio.players.pop(entry_id, None)
     studio.native.pop(entry_id, None)
+    studio._native_next.pop(entry_id, None)
+    if (worker := studio._native_workers.pop(entry_id, None)) is not None:
+        worker.cancel()
     if (unsub := studio._state_unsubs.pop(entry_id, None)) is not None:
         unsub()

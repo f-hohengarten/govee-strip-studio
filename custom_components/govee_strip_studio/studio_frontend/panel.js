@@ -385,8 +385,8 @@ class GoveeStripStudioPanel extends HTMLElement {
     if (rerender) this._render();
     if (this._live) {
       clearTimeout(this._liveTimer);
-      // Native playback re-uploads the whole pattern, so give edits more time to settle.
-      this._liveTimer = setTimeout(() => this._play(true).catch(() => {}), this._native() ? 700 : 250);
+      // Native uploads are coalesced on the server (newest edit wins), so a short debounce is enough.
+      this._liveTimer = setTimeout(() => this._play(true).catch(() => {}), 250);
     }
   }
 
@@ -423,7 +423,9 @@ class GoveeStripStudioPanel extends HTMLElement {
     const s = this._status;
     const native = this._device()?.native;
     if (native && !(s && s.running)) {
-      el.innerHTML = `<span class="dot on"></span> Läuft im Streifen${native.name ? `: <b>${native.name}</b>` : ""}`;
+      el.innerHTML = native.error
+        ? `<span class="dot off"></span> <span class="warn">Senden fehlgeschlagen: ${native.error}</span>`
+        : `<span class="dot on"></span> Läuft im Streifen${native.name ? `: <b>${native.name}</b>` : ""}`;
       return;
     }
     if (!s || !s.running) {
