@@ -26,7 +26,8 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.event import async_track_state_change_event
-from homeassistant.helpers.service import async_extract_referenced_entity_ids
+from homeassistant.const import Platform
+from homeassistant.helpers import service
 from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN
@@ -56,7 +57,7 @@ from .studio_render import (
 
 _LOGGER = logging.getLogger(__name__)
 
-STUDIO_VERSION = "0.2.4"
+STUDIO_VERSION = "0.2.5"
 STORE_KEY = f"{DOMAIN}.strip_studio"
 STORE_VERSION = 1
 PANEL_PATH = "strip-studio"
@@ -678,24 +679,9 @@ async def ws_darts_presets(
 # -- actions for automations ---------------------------------------------------------
 
 
-def _target_entries(hass: HomeAssistant, call: ServiceCall) -> list[str]:
-    """Config entries of the Strip Studio lights an action targets (entities, devices or areas)."""
-    selected = async_extract_referenced_entity_ids(hass, call)
-    registry = er.async_get(hass)
-    entries: list[str] = []
-    for entity_id in sorted(selected.referenced | selected.indirectly_referenced):
-        entity = registry.async_get(entity_id)
-        if (
-            entity is not None
-            and entity.platform == DOMAIN
-            and entity.domain == "light"
-            and entity.config_entry_id
-            and entity.config_entry_id not in entries
-        ):
-            entries.append(entity.config_entry_id)
-    if not entries:
-        raise ServiceValidationError("Choose a light of the Govee Strip Studio integration as target")
-    return entries
+def _entry_id(entity: Any) -> str:
+    """Config entry of a targeted Strip Studio light (resolved by Home Assistant's entity services)."""
+    return entity.coordinator.config_entry.entry_id
 
 
 def _find_effect(studio: StripStudio, wanted: str) -> tuple[str, dict[str, Any]]:
@@ -711,21 +697,17 @@ def _find_effect(studio: StripStudio, wanted: str) -> tuple[str, dict[str, Any]]
     raise ServiceValidationError(f"No Strip Studio effect named '{wanted}'. Saved effects: {names}")
 
 
-async def _service_play(call: ServiceCall) -> None:
+async def _service_play(entity: Any, call: ServiceCall) -> None:
     studio = _studio(call.hass)
     _effect_id, item = _find_effect(studio, call.data["effect"])
-    effect = Effect.from_dict(item["effect"])
-    for entry_id in _target_entries(call.hass, call):
-        try:
-            await studio.async_play(entry_id, effect, name=item.get("name"))
-        except StudioValidationError as err:
-            raise ServiceValidationError(str(err)) from err
+    try:
+        await studio.async_play(_entry_id(entity), Effect.from_dict(item["effect"]), name=item.get("name"))
+    except StudioValidationError as err:
+        raise ServiceValidationError(str(err)) from err
 
 
-async def _service_stop(call: ServiceCall) -> None:
-    studio = _studio(call.hass)
-    for entry_id in _target_entries(call.hass, call):
-        await studio.async_stop(entry_id)
+async def _service_stop(entity: Any, call: ServiceCall) -> None:
+    await _studio(call.hass).async_stop(_entry_id(entity))
 
 
 async def _service_darts_mode(call: ServiceCall) -> None:
@@ -740,11 +722,15 @@ async def _service_darts_mode(call: ServiceCall) -> None:
 
 
 def _register_services(hass: HomeAssistant) -> None:
-    target = cv.make_entity_service_schema
-    hass.services.async_register(
-        DOMAIN, "play_studio_effect", _service_play, schema=target({vol.Required("effect"): cv.string})
-    )
-    hass.services.async_register(DOMAIN, "stop_studio_effect", _service_stop, schema=target({}))
+    # Same mechanism upstream uses for its light actions: Home Assistant resolves the
+    # target (entities, devices, areas) and calls the handler once per targeted light.
+    for name, func, schema in (
+        ("play_studio_effect", _service_play, {vol.Required("effect"): cv.string}),
+        ("stop_studio_effect", _service_stop, {}),
+    ):
+        service.async_register_platform_entity_service(
+            hass, DOMAIN, name, entity_domain=Platform.LIGHT, func=func, schema=schema
+        )
     hass.services.async_register(
         DOMAIN, "set_darts_mode", _service_darts_mode, schema=vol.Schema({vol.Required("enabled"): cv.boolean})
     )

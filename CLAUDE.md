@@ -43,6 +43,9 @@ tests/test_darts.py          Darts-Regeln + Feed gegen echten python-socketio-Se
 5. `panel.js` ohne Build-Schritt und ohne externe Abhängigkeiten halten (wird als statische
    Datei ausgeliefert). Theme-Farben über HA-CSS-Variablen.
 6. Vor jedem Commit: `python3 -m pytest tests/ -q` und `node --check custom_components/govee_strip_studio/studio_frontend/panel.js`.
+   Bei geänderten Home-Assistant-Importen zusätzlich gegen das echte HA prüfen (die Tests simulieren HA nur):
+   `uvx --python 3.14 --with homeassistant==<Version> python tests/check_ha_imports.py`.
+   v0.2.4 lud wegen eines in HA 2026.11 entfernten Helpers gar nicht.
 7. Upstream-Code nutzt Python-3.14-Syntax (`except A, B:`); `py_compile` mit älterem Python
    schlägt dort fehl – das ist kein Fehler im Fork.
 
