@@ -216,8 +216,9 @@ class GoveeStripStudioPanel extends HTMLElement {
     }
   }
 
-  async _play() {
-    await this._call({ type: `${WS}/play`, entry_id: this._entryId, effect: this._effect });
+  async _play(live = false) {
+    // live: swap the effect into the running player; only changed segments are sent.
+    await this._call({ type: `${WS}/play`, entry_id: this._entryId, effect: this._effect, live });
   }
   async _stop() {
     await this._call({ type: `${WS}/stop`, entry_id: this._entryId });
@@ -271,7 +272,7 @@ class GoveeStripStudioPanel extends HTMLElement {
     if (rerender) this._render();
     if (this._live) {
       clearTimeout(this._liveTimer);
-      this._liveTimer = setTimeout(() => this._play().catch(() => {}), 400);
+      this._liveTimer = setTimeout(() => this._play(true).catch(() => {}), 250);
     }
   }
 

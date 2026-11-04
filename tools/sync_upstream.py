@@ -63,6 +63,10 @@ PATCHES: dict[str, list[tuple[str, str]]] = {
             "connection_mode=entry.options.get(CONF_CONNECTION_MODE, CONNECTION_MODE_HOLD),",
         ),
     ],
+    "editor.py": [
+        # Strip Studio is the only sidebar entry; the expert editor stays reachable from device pages.
+        ("        show_in_sidebar=True,\n", "        show_in_sidebar=False,\n"),
+    ],
     "config_flow.py": [
         (
             "self.config_entry.options.get(CONF_CONNECTION_MODE, CONNECTION_MODE_RELEASE)",

@@ -95,7 +95,7 @@ async def async_register_editor_panel(
             },
         },
         require_admin=False,
-        show_in_sidebar=True,
+        show_in_sidebar=False,
         update=True,
     )
 

@@ -41,7 +41,7 @@ from .studio_render import (
 
 _LOGGER = logging.getLogger(__name__)
 
-STUDIO_VERSION = "0.1.0"
+STUDIO_VERSION = "0.1.1"
 STORE_KEY = f"{DOMAIN}.strip_studio"
 STORE_VERSION = 1
 PANEL_PATH = "strip-studio"
@@ -67,6 +67,8 @@ class _Player:
     last_error: str | None = None
     write_seconds: float = 0.0
     name: str | None = None
+    # Set when ``effect`` is swapped in place; wakes a player idling after a static frame.
+    changed: asyncio.Event = field(default_factory=asyncio.Event)
 
     def status(self) -> dict[str, Any]:
         elapsed = max(time.monotonic() - self.started, 1e-6)
@@ -168,7 +170,22 @@ class StripStudio:
         for listener in list(self.listeners):
             listener(payload)
 
-    async def async_play(self, entry_id: str, effect: Effect, *, name: str | None = None) -> None:
+    async def async_play(
+        self, entry_id: str, effect: Effect, *, name: str | None = None, live: bool = False
+    ) -> None:
+        """Play ``effect``.  ``live`` updates a running player in place.
+
+        In-place updates keep the animation clock and the last written frame, so only
+        the segments that actually change are sent.  A normal play repaints everything,
+        which also recovers from any change made to the strip outside the studio.
+        """
+        player = self.players.get(entry_id)
+        if live and player is not None and player.task is not None and not player.task.done():
+            player.effect = effect
+            player.name = name
+            player.changed.set()
+            self._notify(entry_id)
+            return
         await self.async_stop(entry_id, notify=False)
         coordinator = self.coordinator(entry_id)
         player = _Player(entry_id=entry_id, effect=effect, name=name)
@@ -215,7 +232,6 @@ class StripStudio:
         player.writes += 1
 
     async def _run(self, coordinator: Any, player: _Player) -> None:
-        effect = player.effect
         geometry = self.geometry(player.entry_id).rescale(coordinator.profile.segment_count)
         previous: dict[int, tuple[int, int, int]] | None = None
         hidden = [
@@ -228,6 +244,9 @@ class StripStudio:
                 # Cut-off segments are dark so wrap-around never lights invisible hardware.
                 await self._write(coordinator, player, hidden, (0, 0, 0))
             while True:
+                # Clear before rendering: a swap that lands during the writes below must not be lost.
+                player.changed.clear()
+                effect = player.effect
                 t = time.monotonic() - player.started
                 frame = render(effect, geometry, t)
                 writes = frame_writes(frame, previous, step=QUANTIZE_STEP)
@@ -249,7 +268,8 @@ class StripStudio:
                     self._notify(player.entry_id)
                 if not effect.animated:
                     if previous is not None:
-                        break
+                        # Frame is on the strip; stay ready for live edits.
+                        await player.changed.wait()
                     continue
                 await asyncio.sleep(MIN_FRAME_INTERVAL)
         finally:
@@ -370,6 +390,7 @@ async def ws_geometry_set(
         vol.Required("entry_id"): str,
         vol.Optional("effect"): dict,
         vol.Optional("effect_id"): str,
+        vol.Optional("live", default=False): bool,
     }
 )
 @websocket_api.require_admin
@@ -387,7 +408,7 @@ async def ws_play(hass: HomeAssistant, connection: websocket_api.ActiveConnectio
             effect = Effect.from_dict(msg["effect"])
         else:
             raise StudioValidationError("effect or effect_id is required")
-        await studio.async_play(msg["entry_id"], effect, name=name)
+        await studio.async_play(msg["entry_id"], effect, name=name, live=msg["live"])
     except Exception as err:  # noqa: BLE001
         _error(connection, msg["id"], err)
         return
