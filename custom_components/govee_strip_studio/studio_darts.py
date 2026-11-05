@@ -73,6 +73,7 @@ PANEL_PATH = "darts"
 PANEL_ELEMENT = "govee-darts-panel"
 SOUND_URL = f"/api/{DOMAIN}/darts/sound"
 AUTH_POLL_SECONDS = 60
+MAX_SOUND_BYTES = 8 * 1024 * 1024
 _DATA = f"{DOMAIN}_darts"
 # Caller-internal messages that are not game events (no bus event, no LED reaction).
 _CALLER_EVENTS = {"mirror", "welcome", "sync"}
@@ -429,14 +430,17 @@ class DartsSoundView(HomeAssistantView):
             ) as resp:
                 if resp.status != 200:
                     return web.Response(status=resp.status)
-                body = await resp.content.read(8 * 1024 * 1024 + 1)
+                # Read the whole file (``content.read(n)`` returns only what has arrived so far).
+                body = bytearray()
+                async for chunk in resp.content.iter_chunked(64 * 1024):
+                    body += chunk
+                    if len(body) > MAX_SOUND_BYTES:
+                        return web.Response(status=413)
                 content_type = resp.content_type or "audio/mpeg"
         except (aiohttp.ClientError, TimeoutError) as err:
             return web.Response(status=502, text=str(err) or "darts-caller unreachable")
-        if len(body) > 8 * 1024 * 1024:
-            return web.Response(status=413)
         return web.Response(
-            body=body,
+            body=bytes(body),
             content_type=content_type,
             headers={"Cache-Control": "private, max-age=604800"},
         )

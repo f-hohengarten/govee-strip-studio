@@ -6,6 +6,7 @@
 const WS = "govee_strip_studio/darts";
 const SOUND_URL = "/api/govee_strip_studio/darts/sound";
 const STORE = "govee-darts-audio"; // per-browser audio settings (localStorage)
+const SOUND_CACHE = "govee-darts-sounds-v1"; // Cache Storage: sound files survive page reloads
 
 const esc = (v) =>
   String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -153,9 +154,7 @@ class CallerAudio {
   // Must run inside a click: browsers only start audio after a user gesture.
   async start() {
     if (!this.ctx) {
-      // "playback": larger output buffer – no dropouts on Bluetooth speakers, which add
-      // far more delay themselves than the few extra milliseconds this costs.
-      this.ctx = new AudioContext({ latencyHint: "playback" });
+      this.ctx = new AudioContext({ latencyHint: "balanced" });
       this.gain = this.ctx.createGain();
       this.gain.connect(this.ctx.destination);
       this.ctx.onstatechange = () => this._changed();
@@ -220,20 +219,50 @@ class CallerAudio {
     stream.getTracks().forEach((t) => t.stop());
   }
 
+  // Sound bytes: memory, then the persistent Cache Storage, then Home Assistant's proxy.
+  async _bytes(path) {
+    const url = `${SOUND_URL}?path=${encodeURIComponent(path)}`;
+    let cache = null;
+    try {
+      cache = await caches.open(SOUND_CACHE);
+      const hit = await cache.match(url);
+      if (hit) return hit.arrayBuffer();
+    } catch (_) {} // Cache Storage needs a secure context; fall through to the network
+    const r = await this.hass.fetchWithAuth(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.arrayBuffer();
+    cache?.put(url, new Response(data.slice(0), { headers: { "Content-Type": r.headers.get("Content-Type") || "audio/mpeg" } })).catch(() => {});
+    return data;
+  }
+
+  // Keys are decoded paths: darts-caller and the prefetch may encode the same path differently.
   _load(path) {
-    if (!this.buffers.has(path)) {
-      const job = this.hass
-        .fetchWithAuth(`${SOUND_URL}?path=${encodeURIComponent(path)}`)
-        .then((r) => {
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          return r.arrayBuffer();
-        })
-        .then((data) => this.ctx.decodeAudioData(data));
-      job.catch(() => this.buffers.delete(path)); // retry next time
-      this.buffers.set(path, job);
-      if (this.buffers.size > 400) this.buffers.delete(this.buffers.keys().next().value);
+    const key = decodeURIComponent(path);
+    if (!this.buffers.has(key)) {
+      const job = this._bytes(path).then((data) => this.ctx.decodeAudioData(data));
+      job.catch(() => this.buffers.delete(key)); // retry next time
+      this.buffers.set(key, job);
+      if (this.buffers.size > 600) this.buffers.delete(this.buffers.keys().next().value);
     }
-    return this.buffers.get(path);
+    return this.buffers.get(key);
+  }
+
+  // After the first call of a voice, fetch its score calls (0–180) in the background,
+  // so the next announcements start without a network round trip.
+  _prefetch(file) {
+    const full = decodeURIComponent(file.path);
+    const cut = full.lastIndexOf("/");
+    const ext = (/\.[a-z0-9]+$/i.exec(full) || [".mp3"])[0];
+    const folder = full.slice(0, cut + 1);
+    if (cut < 0 || (this._prefetched ||= new Set()).has(folder)) return;
+    this._prefetched.add(folder);
+    const queue = Array.from({ length: 181 }, (_, n) => encodeURIComponent(`${folder}${n}${ext}`));
+    const worker = async () => {
+      while (queue.length && this.enabled) {
+        await this._load(queue.shift()).catch(() => {}); // missing numbers are fine
+      }
+    };
+    for (let i = 0; i < 3; i++) worker();
   }
 
   async _playOne(file) {
@@ -264,6 +293,7 @@ class CallerAudio {
     for (const file of files) {
       // Fetch everything in parallel right away; only the playback is sequenced.
       this._load(file.path).catch(() => {});
+      this._prefetch(file);
       const run = () =>
         this._playOne(file).catch((err) => {
           this.error = `Ton „${file.name}“ nicht abspielbar: ${err.message || err}`;
