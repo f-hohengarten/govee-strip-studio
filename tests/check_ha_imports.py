@@ -13,7 +13,15 @@ from pathlib import Path
 import sys
 
 COMPONENT = Path(__file__).resolve().parent.parent / "custom_components" / "govee_strip_studio"
-OWN = ["strip_studio.py", "studio_darts.py", "darts_feed.py", "darts_rules.py", "darts_presets.py", "studio_render.py"]
+OWN = [
+    "strip_studio.py",
+    "studio_darts.py",
+    "darts_feed.py",
+    "darts_rules.py",
+    "darts_presets.py",
+    "darts_caller.py",
+    "studio_render.py",
+]
 
 missing = []
 checked = 0

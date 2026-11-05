@@ -60,6 +60,8 @@ class DartsFeed:
         self.last_event: str | None = None
         self.last_event_at: float | None = None
         self._joined = False
+        self._ws: aiohttp.ClientWebSocketResponse | None = None
+        self.sessions = 0  # bumped on every successful join, so callers can re-apply settings once
         self._task: asyncio.Task | None = None
 
     def status(self) -> dict[str, Any]:
@@ -85,6 +87,12 @@ class DartsFeed:
                 pass
             self._task = None
         self.connected = False
+
+    async def send(self, message: str) -> None:
+        """Send one text command to darts-caller, as its own web UI does."""
+        if self._ws is None or not self.connected:
+            raise ConnectionError("not connected to darts-caller")
+        await self._ws.send_str("42" + json.dumps(["message", message]))
 
     def _set(self, *, connected: bool, error: str | None = None) -> None:
         self.connected = connected
@@ -138,26 +146,36 @@ class DartsFeed:
             silence = (info.get("pingInterval", 25000) + info.get("pingTimeout", 20000)) / 1000
             await ws.send_str("40" + json.dumps({"token": token}) if token else "40")
             self.scheme = scheme
-            while True:
-                msg = await ws.receive(timeout=silence)
-                if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING):
-                    raise ConnectionError("darts-caller closed the connection")
-                if msg.type is aiohttp.WSMsgType.ERROR:
-                    raise ConnectionError(str(ws.exception()) or "websocket error")
-                if msg.type is not aiohttp.WSMsgType.TEXT:
-                    continue
-                data: str = msg.data
-                if data == "2":
-                    await ws.send_str("3")
-                elif data.startswith("40"):
-                    self._joined = True
-                    self._set(connected=True)
-                elif data.startswith("44"):
-                    raise ConnectionError(f"darts-caller refused the connection: {data[2:200]}")
-                elif data.startswith("41"):
-                    raise ConnectionError("darts-caller ended the session")
-                elif data.startswith("42"):
-                    self._dispatch(data[2:])
+            self._ws = ws
+            try:
+                await self._receive(ws, silence)
+            finally:
+                self._ws = None
+
+    async def _receive(self, ws: aiohttp.ClientWebSocketResponse, silence: float) -> None:
+        while True:
+            msg = await ws.receive(timeout=silence)
+            if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING):
+                raise ConnectionError("darts-caller closed the connection")
+            if msg.type is aiohttp.WSMsgType.ERROR:
+                raise ConnectionError(str(ws.exception()) or "websocket error")
+            if msg.type is not aiohttp.WSMsgType.TEXT:
+                continue
+            data: str = msg.data
+            if data == "2":
+                await ws.send_str("3")
+            elif data.startswith("40"):
+                self._joined = True
+                self.sessions += 1
+                self._set(connected=True)
+                # Ask for the caller list ("welcome": voices, favourites, current voice).
+                await ws.send_str("42" + json.dumps(["message", "hello"]))
+            elif data.startswith("44"):
+                raise ConnectionError(f"darts-caller refused the connection: {data[2:200]}")
+            elif data.startswith("41"):
+                raise ConnectionError("darts-caller ended the session")
+            elif data.startswith("42"):
+                self._dispatch(data[2:])
 
     def _dispatch(self, raw: str) -> None:
         try:

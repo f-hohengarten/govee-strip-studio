@@ -24,29 +24,41 @@ Die Bluetooth-Verbindung wird standardmäßig gehalten („hold“), damit Befeh
 
 ## Darts (Autodarts)
 
-Strip Studio kann auf Autodarts-Spiele reagieren: Würfe, Aufnahmen, Bust, Leg-/Match-Gewinn,
-Takeout und Spielerwechsel lösen deine gespeicherten Effekte aus. Kurze Effekte springen nach
-der eingestellten Zeit zurück auf die Farbe des Spielers am Zug.
+Die Integration bringt einen zweiten Bereich **„Darts“** in der Seitenleiste mit:
+
+- **Live:** Spieler am Board, Restpunkte, die drei Darts der Aufnahme.
+- **Caller in diesem Browser:** spielt die Ansagen von darts-caller im Browser ab – auf einem
+  Ausgabegerät deiner Wahl (Chrome/Edge), z. B. einem per Bluetooth gekoppelten Echo Dot.
+  Autodarts in einem anderen Tab bleibt auf den normalen Lautsprechern. Der Tab muss offen
+  bleiben; „Ton aktivieren“ einmal pro Seitenaufruf (Browser-Regel).
+- **Caller:** Stimme, Sprache, Ansage-Optionen (jeder Dart, Spieler, Checkout …). Die Werte werden
+  gespeichert und nach einem Neustart von darts-caller automatisch wieder gesetzt.
+- **Board:** Start, Stopp, Reset, Kalibrieren, nächster Spieler.
+- **LED-Reaktionen:** Würfe, Aufnahmen, Bust, Leg-/Match-Gewinn, Takeout und Spielerwechsel lösen
+  gespeicherte Strip-Studio-Effekte aus; kurze Effekte springen danach auf die Farbe des Spielers
+  am Zug zurück. „✨ Vorlagen anlegen“ legt eine fertige Belegung an, ohne eigene Zuordnungen zu
+  überschreiben. Darts-Effekte selbst baust du im Strip Studio (Haken „🎯 Darts-Effekt“).
+- Die Kopfzeile zeigt, ob darts-caller verbunden **und bei Autodarts angemeldet** ist – ohne
+  Anmeldung kommen keine Würfe an.
 
 Die Ereignisse liefert [darts-caller](https://github.com/Peschi90/darts-caller), das auf dem
 Autodarts-Rechner läuft (Ubuntu, Raspberry Pi, Windows …):
 
 ```bash
-sudo mkdir -p /opt/darts-caller/media /opt/darts-caller/media-shared && cd /opt/darts-caller
-sudo curl -L -o darts-caller https://github.com/Peschi90/darts-caller/releases/latest/download/darts-caller-linux
+sudo mkdir -p /opt/darts-caller /opt/darts-media /opt/darts-media-shared && cd /opt/darts-caller
+sudo curl -L -o darts-caller https://github.com/Peschi90/darts-caller/releases/latest/download/darts-caller
 sudo chmod +x darts-caller
-sudo ./darts-caller -B DEINE_BOARD_ID -M /opt/darts-caller/media -MS /opt/darts-caller/media-shared
+sudo ./darts-caller -B DEINE_BOARD_ID -M /opt/darts-media -MS /opt/darts-media-shared
 ```
 
-Danach `https://IP-DES-RECHNERS:8079` im Browser öffnen, Zertifikatswarnung bestätigen und den
-Autodarts-Login über den angezeigten Code freigeben (einmalig). Für den Autostart als Dienst
-siehe die darts-caller-Anleitung.
+Die Medienordner dürfen nicht im Programmordner liegen. Danach `https://IP-DES-RECHNERS:8079`
+im Browser öffnen, Zertifikatswarnung bestätigen und den Autodarts-Login über den angezeigten
+Code freigeben (einmalig). Läuft darts-caller als systemd-Dienst, sollte er erst nach dem Netzwerk
+starten (`Wants=`/`After=network-online.target`), sonst scheitert die Autodarts-Anmeldung beim Booten.
 
-Im Strip Studio → Karte **Darts**: IP des Rechners eintragen, „Aktiv“ anhaken, speichern und jedem
-Ereignis einen Effekt zuordnen (▶ testet ohne Werfen). „✨ Vorlagen anlegen“ legt eine fertige
-Belegung an (Farbe pro Spieler, Regenbogen bei 180, rotes Pulsieren bei Bust …), ohne eigene
-Zuordnungen zu überschreiben. Jedes Ereignis wird zusätzlich als
-Home-Assistant-Ereignis `govee_strip_studio_darts` gemeldet – für eigene Automationen.
+Im Bereich **Darts** → Karte **Verbindung** die IP des Rechners eintragen und speichern. Jedes
+Ereignis wird zusätzlich als Home-Assistant-Ereignis `govee_strip_studio_darts` gemeldet – für
+eigene Automationen.
 
 ## Automationen
 
@@ -65,7 +77,7 @@ action: govee_strip_studio.stop_studio_effect
 target:
   entity_id: light.dart
 
-# Darts-Modus an/aus, z. B. wenn der Autodarts-Rechner hoch- oder herunterfährt
+# LED-Reaktionen auf Darts an/aus, z. B. wenn der Autodarts-Rechner hoch- oder herunterfährt
 action: govee_strip_studio.set_darts_mode
 data:
   enabled: true

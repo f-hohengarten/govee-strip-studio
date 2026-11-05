@@ -17,10 +17,12 @@ custom_components/govee_strip_studio/   die Integration (Domain: govee_strip_stu
   strip_studio.py          EIGEN: Player, Speicher, WebSocket-API, Panel-Registrierung
   studio_render.py         EIGEN: reine Render-Engine (kein HA-Import!)
   studio_frontend/panel.js EIGEN: Seitenleisten-Panel, Vanilla-Web-Component ohne Build
-  studio_darts.py          EIGEN: Autodarts-Steuerung (Ereignis → gespeicherter Effekt, Rücksprung)
+  studio_frontend/darts_panel.js EIGEN: Darts-Panel (Caller-Ton im Browser per setSinkId, Board, LED-Regeln)
+  studio_darts.py          EIGEN: Darts-Bereich: LED-Reaktionen, Caller-Weiterleitung, Sound-Proxy, WebSocket-API, Panel
   darts_feed.py            EIGEN: Socket.IO-Client für darts-caller (nur aiohttp, kein HA-Import)
   darts_rules.py           EIGEN: reine Ereignis-Klassifikation (kein HA-Import)
   darts_presets.py         EIGEN: fertige Darts-Effekte + Standard-Zuordnung (kein HA-Import)
+  darts_caller.py          EIGEN: darts-caller-Fernsteuerung (Optionen → Textbefehle, Sound-Pfade; kein HA-Import)
   studio_services.yaml     EIGEN: Beschreibung der Studio-Aktionen; sync hängt sie an services.yaml an
   alles andere             UPSTREAM (umbenannt) – nicht direkt bearbeiten, siehe unten
 tools/sync_upstream.py     erzeugt den Fork aus einem Upstream-Release neu

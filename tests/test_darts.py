@@ -134,3 +134,72 @@ def test_apply_presets_fills_gaps_only_and_is_idempotent():
     assert darts_rules["takeout"] == {"effect_id": "darts-takeout"}
     assert presets.apply_presets(effects, darts_rules) == ([], [])
     assert all(effects[i]["group"] == presets.DARTS_GROUP for i in presets.PRESETS) and "group" not in effects["mine"]
+
+
+# -- live game summary -----------------------------------------------------------------
+
+
+def test_game_update_tracks_visit_and_resets():
+    game = {}
+    assert rules.game_update(game, {"event": "match-started"}) and game == {"event": "match-started", "darts": []}
+    for n, (field, value) in enumerate([("t20", "60"), ("s5", "5"), ("s1", "1")], start=1):
+        msg = {"event": f"dart{n}-thrown", "player": "Fred", "game": {"pointsLeft": str(501 - 66), "dartNumber": str(n), "fieldName": field, "dartValue": value}}
+        assert rules.game_update(game, msg)
+    assert game["player"] == "Fred" and [d["field"] for d in game["darts"]] == ["t20", "s5", "s1"]
+    rules.game_update(game, {"event": "darts-thrown", "game": {"dartValue": "66"}})
+    assert game["visit"] == "66"
+    rules.game_update(game, {"event": "dart1-thrown", "game": {"dartNumber": "1", "fieldName": "d20", "dartValue": "40"}})
+    assert [d["field"] for d in game["darts"]] == ["d20"]  # a new visit starts fresh
+    assert not rules.game_update(game, {"event": "Board Status", "data": {"status": "Takeout Started"}})
+    assert rules.game_update(game, {"event": "match-ended"}) and game == {}
+
+
+# -- caller remote control -------------------------------------------------------------
+
+caller = _load("darts_caller")
+
+
+def test_caller_options_validate_and_map_to_commands():
+    opts = caller.validate_options(
+        {"voice": "en-us-sage-female", "language": "4", "every_dart": 2, "bot_actions": 0, "checkout_calls": None, "x": 1}
+    )
+    assert opts == {"voice": "en-us-sage-female", "language": 4, "every_dart": 2, "bot_actions": False}
+    # filters first, then the voice, so the voice is picked from the filtered list
+    assert caller.option_commands(opts) == ["language:4", "caller:en-us-sage-female", "arg:e:2", "arg:cba:0"]
+    assert caller.option_commands(opts, {"every_dart"}) == ["arg:e:2"]
+    for bad in ({"language": 9}, {"every_dart": "x"}, {"voice": "a:b"}, {"voice": "x\nboard-stop"}):
+        with pytest.raises(caller.CallerOptionError):
+            caller.validate_options(bad)
+    assert caller.validate_options("nope") == {}
+
+
+@pytest.mark.parametrize(
+    ("path", "ok"),
+    [
+        ("%2Fopt%2Fdarts-media%2Fen-US-sage-FEMALE%2Fmatchon%2B1.mp3", True),
+        ("%2Fopt%2Fdarts-media%2Fen-US-sage-FEMALE%2F18.WAV", True),
+        ("%2Fetc%2Fpasswd", False),
+        ("%2Fopt%2Fdarts-media%2F..%2F..%2Fetc%2Fshadow.mp3", False),
+        ("%2Fopt%2Fa.mp3%00.txt", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_sound_paths(path, ok):
+    assert caller.sound_path_ok(path) is ok
+
+
+def test_mirror_files_are_normalised():
+    files = caller.mirror_files(
+        {
+            "event": "mirror",
+            "files": [
+                {"caller": "en-us-sage-female", "path": "%2Fopt%2Fm%2F18.mp3", "wait": False, "volume": 1.0, "mod": True, "skip_if_busy": False},
+                {"path": "%2Fetc%2Fpasswd"},
+                {"path": "%2Fopt%2Fm%2Fbust.mp3", "wait": 1, "volume": "9"},
+                "garbage",
+            ],
+        }
+    )
+    assert [f["name"] for f in files] == ["18.mp3", "bust.mp3"]
+    assert files[1]["wait"] is True and files[1]["volume"] == 2.0

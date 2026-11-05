@@ -139,3 +139,32 @@ def test_feed_reports_unreachable_host():
             await feed.stop()
 
     asyncio.run(scenario())
+
+
+def test_feed_says_hello_and_sends_commands_like_the_caller_web_ui():
+    async def scenario():
+        port = _free_port()
+        sio, runner = await _serve(port, ping_interval=5, require_token=True)
+        heard = []
+
+        @sio.on("message")
+        async def on_message(sid, data):
+            heard.append(data)
+            if data == "hello":
+                await sio.emit("message", {"event": "welcome", "caller": "en-us-onyx-male", "callersAvailable": ["en-us-onyx-male"], "callersFavoured": []}, to=sid)
+
+        received = []
+        async with aiohttp.ClientSession() as session:
+            feed = feed_module.DartsFeed(session, "127.0.0.1", port, received.append)
+            with pytest.raises(ConnectionError):
+                await feed.send("board-stop")  # not connected yet
+            feed.start(asyncio.ensure_future)
+            await _wait(lambda: received)
+            assert received[0]["event"] == "welcome" and heard == ["hello"] and feed.sessions == 1
+            await feed.send("caller:en-us-sage-female")
+            await _wait(lambda: len(heard) == 2)
+            assert heard[1] == "caller:en-us-sage-female"
+            await feed.stop()
+        await runner.cleanup()
+
+    asyncio.run(scenario())

@@ -199,3 +199,37 @@ def duration_of(trigger: str, rule: dict[str, Any]) -> float | None:
         return max(0.5, min(60.0, float(value)))
     except (TypeError, ValueError):
         return DEFAULT_DURATION
+
+
+def game_update(game: dict[str, Any], msg: dict[str, Any]) -> bool:
+    """Fold one darts-caller event into the live game summary; True if it changed."""
+    event = str(msg.get("event") or "")
+    info = msg.get("game") if isinstance(msg.get("game"), dict) else {}
+    if event == "match-started":
+        game.clear()
+        game.update({"event": event, "darts": []})
+        return True
+    if event in ("match-ended", "lobby"):
+        changed = bool(game)
+        game.clear()
+        return changed
+    if not (event.startswith("dart") or event in ("busted", "game-won", "match-won")):
+        return False
+    if msg.get("player") is not None:
+        game["player"] = str(msg["player"])
+    if info.get("pointsLeft") not in (None, ""):
+        game["points_left"] = info["pointsLeft"]
+    if info.get("mode"):
+        game["mode"] = info["mode"]
+    darts = game.setdefault("darts", [])
+    if event.endswith("-thrown") and event[4:5].isdigit():
+        if info.get("dartNumber") in ("1", 1):
+            darts.clear()
+        darts.append({"field": info.get("fieldName") or "", "value": info.get("dartValue")})
+        del darts[:-3]
+    elif event == "darts-thrown":
+        game["visit"] = info.get("dartValue")
+    elif event in ("game-won", "match-won"):
+        game["visit"] = info.get("dartsThrownValue", game.get("visit"))
+    game["event"] = event
+    return True

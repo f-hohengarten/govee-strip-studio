@@ -153,8 +153,8 @@ stop_studio_effect:
   target: {entity: {integration: govee_strip_studio, domain: light}}
 
 set_darts_mode:
-  name: Darts-Modus schalten
-  description: Schaltet den Darts-Modus an (Verbindung zu darts-caller, Würfe steuern den Streifen) oder aus.
+  name: Darts-LED-Reaktionen schalten
+  description: Schaltet die LED-Reaktionen auf Autodarts-Würfe an oder aus. Caller-Ton und Verbindung zu darts-caller laufen unabhängig davon weiter.
   fields:
     enabled:
       name: An
