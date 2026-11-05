@@ -42,6 +42,54 @@ const EVENT_LABELS = {
 };
 
 // ---------------------------------------------------------------------------------
+// Checkout suggestions (double out): the cheapest route by darts used, then by how
+// comfortable the finishing double and the set-up darts are.
+// ---------------------------------------------------------------------------------
+const DOUBLE_RANK = { 20: 0, 16: 1, 8: 2, 18: 3, 12: 4, 10: 4, 4: 6, 6: 6, 14: 6, 2: 8, 25: 9 };
+const FIELDS = (() => {
+  const out = [];
+  for (let n = 20; n >= 1; n--) {
+    out.push({ name: `T${n}`, score: 3 * n, cost: n >= 17 ? 20 - n : 6 + (20 - n) / 4 });
+    out.push({ name: `S${n}`, score: n, cost: 1 + (20 - n) / 10 });
+    out.push({ name: `D${n}`, score: 2 * n, cost: 8, double: true, rank: DOUBLE_RANK[n] ?? 10 + (20 - n) / 4 });
+  }
+  out.push({ name: "S25", score: 25, cost: 5 });
+  out.push({ name: "Bull", score: 50, cost: 6, double: true, rank: DOUBLE_RANK[25] });
+  return out;
+})();
+const DOUBLES = FIELDS.filter((f) => f.double);
+const _checkouts = new Map();
+
+function checkout(points, dartsLeft = 3) {
+  points = Number(points);
+  if (!Number.isInteger(points) || points < 2 || points > 170 || dartsLeft < 1) return null;
+  const key = `${points}/${dartsLeft}`;
+  if (_checkouts.has(key)) return _checkouts.get(key);
+  let best = null;
+  const consider = (route, cost) => {
+    if (!best || cost < best.cost) best = { route, cost };
+  };
+  for (const d of DOUBLES) {
+    if (d.score === points) consider([d], 1000 + d.rank);
+  }
+  if (!best && dartsLeft >= 2) {
+    for (const a of FIELDS)
+      for (const d of DOUBLES)
+        if (a.score + d.score === points) consider([a, d], 2000 + d.rank + a.cost);
+  }
+  if (!best && dartsLeft >= 3) {
+    for (const a of FIELDS)
+      for (const b of FIELDS)
+        if (a.score + b.score < points)
+          for (const d of DOUBLES)
+            if (a.score + b.score + d.score === points) consider([a, b, d], 3000 + d.rank + a.cost + b.cost);
+  }
+  const result = best ? best.route.map((f) => f.name) : null;
+  _checkouts.set(key, result);
+  return result;
+}
+
+// ---------------------------------------------------------------------------------
 // Caller audio: lives as long as the browser tab, not just while the panel is shown,
 // so the caller keeps talking while you use other Home Assistant pages.
 // ---------------------------------------------------------------------------------
@@ -105,7 +153,9 @@ class CallerAudio {
   // Must run inside a click: browsers only start audio after a user gesture.
   async start() {
     if (!this.ctx) {
-      this.ctx = new AudioContext({ latencyHint: "interactive" });
+      // "playback": larger output buffer – no dropouts on Bluetooth speakers, which add
+      // far more delay themselves than the few extra milliseconds this costs.
+      this.ctx = new AudioContext({ latencyHint: "playback" });
       this.gain = this.ctx.createGain();
       this.gain.connect(this.ctx.destination);
       this.ctx.onstatechange = () => this._changed();
@@ -204,11 +254,13 @@ class CallerAudio {
     });
   }
 
-  // Same ordering as darts-caller's own web caller: files flagged "wait" (and the one
-  // after them) are chained, everything else starts at once.
+  // Same ordering as darts-caller's own web caller: every announcement waits until the
+  // previous one has finished (its first file is chained), files flagged "wait" and the
+  // one after them are chained too, the rest start together with their predecessor.
   play(files) {
     if (!this.enabled || !this.ctx) return;
     if (this.ctx.state !== "running") this.ctx.resume().catch(() => {});
+    this.previousWait = true;
     for (const file of files) {
       // Fetch everything in parallel right away; only the playback is sequenced.
       this._load(file.path).catch(() => {});
@@ -258,6 +310,8 @@ class GoveeDartsPanel extends HTMLElement {
     this._outputs = [];
     this._message = null;
     this._pendingRender = false;
+    this._view = "play"; // play | settings
+    this._tab = "audio";
   }
 
   set hass(hass) {
@@ -425,22 +479,22 @@ class GoveeDartsPanel extends HTMLElement {
   }
 
   // ---------- rendering ----------
-  _pill(kind, text, title = "") {
-    return `<span class="pill ${kind}" title="${esc(title)}"><i></i>${text}</span>`;
+  _dot(kind, text, title = "") {
+    return `<span class="dot ${kind}" title="${esc(title || text)}"><i></i><span>${text}</span></span>`;
   }
 
-  _statusPills() {
+  // Compact status: three dots; the words only show where something needs attention.
+  _statusDots() {
     const s = this._info.status;
     const feed = s.feed;
     const out = [];
-    if (!s.host) out.push(this._pill("off", "darts-caller nicht eingerichtet"));
-    else if (feed?.connected) out.push(this._pill("on", "darts-caller verbunden"));
-    else out.push(this._pill("bad", "darts-caller getrennt", feed?.error || ""));
+    if (!s.host) out.push(this._dot("bad", "darts-caller einrichten"));
+    else if (feed?.connected) out.push(this._dot("on", "darts-caller", "darts-caller verbunden"));
+    else out.push(this._dot("bad", "darts-caller getrennt", feed?.error || ""));
     if (s.host && feed?.connected) {
       const [kind, text] = AUTODARTS[s.autodarts?.state] || AUTODARTS.unknown;
-      out.push(this._pill(kind, text, s.autodarts?.error || ""));
+      out.push(this._dot(kind, kind === "on" ? "Autodarts" : text, [text, s.autodarts?.error].filter(Boolean).join(": ")));
     }
-    out.push(this._pill(s.enabled ? "on" : "off", s.enabled ? "LED-Reaktionen an" : "LED-Reaktionen aus"));
     return out.join("");
   }
 
@@ -450,44 +504,54 @@ class GoveeDartsPanel extends HTMLElement {
     if (s.feed?.connected && (state === "failed" || state === "unreachable")) {
       return `<div class="alert">
         <b>darts-caller ist nicht bei Autodarts angemeldet</b> – ohne Anmeldung kommen keine Würfe an.
-        ${s.autodarts?.error ? `<code>${esc(s.autodarts.error).slice(0, 220)}</code>` : ""}
         Starte darts-caller neu: <code>sudo systemctl restart darts-caller</code>
+        ${s.autodarts?.error ? `<details><summary>Details</summary><code>${esc(s.autodarts.error).slice(0, 300)}</code></details>` : ""}
       </div>`;
     }
     if (state === "pending") {
       return `<div class="alert warn">darts-caller wartet auf deine Autodarts-Bestätigung. Öffne
         <a href="https://${esc(s.host)}:${esc(s.port)}/" target="_blank" rel="noopener">die darts-caller-Seite</a> und folge dem Code.</div>`;
     }
+    if (!s.host) {
+      return `<div class="alert warn">Noch keine Verbindung eingerichtet. <button data-open="board">Jetzt einrichten</button></div>`;
+    }
     return "";
   }
 
-  _liveCard() {
+  // The game view: the visit on top, the player in the middle (like Autodarts' own screen).
+  _stage() {
     const g = this._info.status.game || {};
     const has = Object.keys(g).length > 0;
     const darts = g.darts || [];
+    const sum = darts.reduce((t, d) => t + (Number(d.value) || 0), 0);
+    const total = g.event === "darts-thrown" && g.visit != null ? g.visit : darts.length ? sum : "";
     const slots = [0, 1, 2]
-      .map((i) => {
-        const d = darts[i];
-        return `<div class="dart ${d ? "hit" : ""}">${d ? `<b>${esc((d.field || "").toUpperCase() || d.value)}</b><span>${esc(d.value ?? "")}</span>` : "–"}</div>`;
-      })
+      .map((i) => `<div class="slot ${darts[i] ? "hit" : ""}">${darts[i] ? esc((darts[i].field || "").toUpperCase() || darts[i].value) : ""}</div>`)
       .join("");
     const label = EVENT_LABELS[g.event] || "";
-    const call = AUDIO.enabled && AUDIO.lastCall ? `🔊 ${esc(AUDIO.lastCall)}` : "";
-    return `<div class="live-main">
-        <div class="who">
-          <span class="caption">${has ? "Am Board" : "Kein laufendes Spiel"}</span>
-          <span class="player">${has && g.player ? esc(g.player) : "—"}</span>
-          <span class="caption">${esc(label)}${g.visit != null && g.event !== "match-started" ? ` · ${esc(g.visit)} Punkte` : ""}</span>
-        </div>
-        <div class="score"><span class="caption">Rest</span><span class="points">${has && g.points_left != null ? esc(g.points_left) : "—"}</span></div>
+    // Darts still to throw in this visit: after dart 1 or 2 of a visit, the rest of it.
+    const thrown = /^dart([12])-thrown$/.exec(g.event || "");
+    const left = thrown ? 3 - Number(thrown[1]) : 3;
+    const route = has && g.points_left != null ? checkout(g.points_left, left) : null;
+    const finish =
+      has && Number(g.points_left) <= 170 && Number(g.points_left) > 1
+        ? route
+          ? `<div class="finish">${route.map((f) => `<span>${f}</span>`).join("")}</div>`
+          : `<div class="finish none">${left < 3 ? `Kein Finish mit ${left} ${left === 1 ? "Dart" : "Darts"}` : "Kein Finish möglich"}</div>`
+        : "";
+    const bad = g.event === "busted";
+    const won = g.event === "game-won" || g.event === "match-won";
+    return `<div class="visit">${slots}<div class="slot total">${esc(total)}</div></div>
+      <div class="playercard ${bad ? "bust" : ""} ${won ? "won" : ""} ${has ? "" : "idle"}">
+        <div class="tag">${has && g.player ? `<i></i>${esc(g.player)}` : "Kein laufendes Spiel"}</div>
+        <div class="points">${has && g.points_left != null ? esc(g.points_left) : "–"}</div>
+        ${finish}
+        <div class="sub">${esc(label)}${g.mode ? `<span class="mode">${esc(g.mode)}</span>` : ""}</div>
       </div>
-      <div class="darts">${slots}</div>
-      <div class="lastcall">${call}</div>`;
+      <div class="lastcall">${AUDIO.enabled && AUDIO.lastCall ? `🔊 ${esc(AUDIO.lastCall)}` : ""}</div>`;
   }
 
-  _audioCard() {
-    const supported = AUDIO.supportsSink;
-    const named = this._outputs.some((d) => d.label);
+  _sinkOptions() {
     const options = this._outputs
       .map((d) => {
         const isDefault = !d.deviceId || d.deviceId === "default";
@@ -500,8 +564,34 @@ class GoveeDartsPanel extends HTMLElement {
       AUDIO.sinkId && !this._outputs.some((d) => d.deviceId === AUDIO.sinkId)
         ? `<option value="${esc(AUDIO.sinkId)}" selected>${esc(AUDIO.sinkLabel || "Gespeichertes Gerät")} (nicht verbunden)</option>`
         : "";
-    return `<h2>🔊 Caller in diesem Browser</h2>
-      <p class="hint">Spielt die Ansagen von darts-caller hier ab – auf dem Ausgabegerät deiner Wahl, z. B. deinem per Bluetooth gekoppelten Echo Dot. Autodarts im anderen Tab bleibt auf den Laptop-Lautsprechern.</p>
+    return missing + (options || `<option value="">Standard</option>`);
+  }
+
+  // The bar under the game: only what you touch while playing.
+  _controls() {
+    const s = this._info.status;
+    const on = AUDIO.enabled;
+    const disabled = this._connected() ? "" : "disabled";
+    return `<button class="round ${on ? "on" : ""}" data-audio="toggle" title="${on ? "Caller in diesem Browser aus" : "Caller in diesem Browser an"}">${on ? "🔊" : "🔇"}</button>
+      ${
+        on && AUDIO.suspended
+          ? `<button class="primary" data-audio="resume">Ton aktivieren</button>`
+          : on
+            ? `${AUDIO.supportsSink ? `<select class="sink" data-audio="sink" title="Ausgabegerät">${this._sinkOptions()}</select>` : ""}
+               <label class="volbox" title="Lautstärke"><input type="range" min="0" max="150" step="5" value="${AUDIO.volume}" data-audio="volume"/><b class="vol">${AUDIO.volume} %</b></label>`
+            : `<span class="muted small">Caller aus</span>`
+      }
+      <span class="spacer"></span>
+      <label class="switch" title="LED-Reaktionen auf Würfe"><input type="checkbox" data-led="enabled" ${s.enabled ? "checked" : ""} ${s.host ? "" : "disabled"}/><span></span> 💡</label>
+      <button data-cmd="board-reset" title="Erkennung zurücksetzen" ${disabled}>↺</button>
+      <button class="primary" data-cmd="next" title="Zum nächsten Spieler" ${disabled}>Weiter</button>
+      ${AUDIO.error && on ? `<p class="warn full">${esc(AUDIO.error)}</p>` : ""}`;
+  }
+
+  _audioCard() {
+    const supported = AUDIO.supportsSink;
+    const named = this._outputs.some((d) => d.label);
+    return `<p class="hint">Spielt die Ansagen von darts-caller hier ab – auf dem Ausgabegerät deiner Wahl, z. B. deinem per Bluetooth gekoppelten Echo Dot. Autodarts im anderen Tab bleibt auf den Laptop-Lautsprechern.</p>
       <label class="switch big"><input type="checkbox" data-audio="enabled" ${AUDIO.enabled ? "checked" : ""}/><span></span> Caller hier abspielen</label>
       ${
         AUDIO.suspended
@@ -512,7 +602,7 @@ class GoveeDartsPanel extends HTMLElement {
         <span>Ausgabegerät</span>
         ${
           supported
-            ? `<select data-audio="sink">${missing}${options || `<option value="">Standard</option>`}</select>`
+            ? `<select data-audio="sink">${this._sinkOptions()}</select>`
             : `<span class="hint">Dieser Browser kann kein Ausgabegerät wählen – nutze Chrome oder Edge, oder stelle das Gerät im System ein.</span>`
         }
       </div>
@@ -521,7 +611,7 @@ class GoveeDartsPanel extends HTMLElement {
           ? `<button data-audio="unlock" class="wide-btn">Gerätenamen anzeigen</button><p class="hint">Chrome zeigt die Namen erst nach einer einmaligen Mikrofon-Freigabe. Das Mikrofon wird dabei nicht genutzt.</p>`
           : ""
       }
-      <div class="field"><span>Lautstärke</span><input type="range" min="0" max="150" step="5" value="${AUDIO.volume}" data-audio="volume"/><b class="vol">${AUDIO.volume} %</b></div>
+      <label class="field volbox"><span>Lautstärke</span><input type="range" min="0" max="150" step="5" value="${AUDIO.volume}" data-audio="volume"/><b class="vol">${AUDIO.volume} %</b></label>
       <div class="actions">
         <button data-audio="tone">♪ Testton</button>
         <button data-cmd="call:hi" data-done="Probe-Ansage angefordert" ${this._connected() ? "" : "disabled"}>🗣 Probe-Ansage</button>
@@ -557,8 +647,7 @@ class GoveeDartsPanel extends HTMLElement {
         ${labels.map((l, i) => `<option value="${i}" ${cur === String(i) ? "selected" : ""}>${esc(l)}</option>`).join("")}
       </select>`;
     };
-    return `<h2>🗣 Caller</h2>
-      <div class="voice">
+    return `<div class="voice">
         <select data-opt="voice" ${disabled}>
           ${available.length ? "" : `<option value="">Keine Stimmen gemeldet</option>`}
           ${available.map((c) => `<option value="${esc(c)}" ${c === current ? "selected" : ""}>${fav.has(c) ? "★ " : ""}${esc(voiceLabel(c))}</option>`).join("")}
@@ -577,7 +666,7 @@ class GoveeDartsPanel extends HTMLElement {
 
   _boardCard() {
     const disabled = this._connected() ? "" : "disabled";
-    return `<h2>🎯 Board</h2>
+    return `<h3>Board</h3>
       <div class="board">${BOARD.map(([cmd, label, title]) => `<button data-cmd="${cmd}" title="${title}" ${disabled}>${label}</button>`).join("")}</div>`;
   }
 
@@ -615,10 +704,7 @@ class GoveeDartsPanel extends HTMLElement {
           </div>`;
         })
         .join("");
-    return `<div class="card-head">
-        <h2>💡 LED-Reaktionen</h2>
-        <label class="switch"><input type="checkbox" data-led="enabled" ${d.enabled ? "checked" : ""} ${d.host ? "" : "disabled"}/><span></span> ${d.enabled ? "An" : "Aus"}</label>
-      </div>
+    return `<label class="switch big"><input type="checkbox" data-led="enabled" ${d.enabled ? "checked" : ""} ${d.host ? "" : "disabled"}/><span></span> LED-Reaktionen ${d.enabled ? "an" : "aus"}</label>
       <p class="hint">Spielt bei Würfen und Spielereignissen gespeicherte Strip-Studio-Effekte. Kurze Effekte kehren danach zur Farbe des Spielers zurück, der dran ist.</p>
       <div class="inline">
         ${
@@ -642,7 +728,7 @@ class GoveeDartsPanel extends HTMLElement {
   _connCard() {
     const d = this._draft;
     const feed = this._info.status.feed;
-    return `<h2>🔌 Verbindung</h2>
+    return `<h3>Verbindung</h3>
       <p class="hint">Adresse des Rechners, auf dem darts-caller läuft.</p>
       <div class="inline">
         <label class="field"><span>darts-caller</span><input class="text" data-conn="host" placeholder="192.168.1.130" value="${esc(d.host)}"/></label>
@@ -662,23 +748,32 @@ class GoveeDartsPanel extends HTMLElement {
       this._menu();
       return;
     }
+    const settings = this._view === "settings";
+    const tabs = [
+      ["audio", "🔊 Ton", () => this._audioCard()],
+      ["caller", "🗣 Caller", () => this._callerCard()],
+      ["led", "💡 LED", () => this._ledCard()],
+      ["board", "🎯 Board & Verbindung", () => this._boardCard() + this._connCard()],
+    ];
+    const tab = tabs.find(([id]) => id === this._tab) || tabs[0];
     root.innerHTML = `<style>${STYLE}</style>
-      <div class="page">
+      <div class="page ${settings ? "settings" : "play"}">
         <header>
           <ha-menu-button></ha-menu-button>
-          <div class="title">Darts</div>
-          <div class="pills">${this._statusPills()}</div>
+          ${settings ? `<button class="ghost" data-act="back" title="Zurück zum Spiel">←</button>` : ""}
+          <div class="title">${settings ? "Einstellungen" : "Darts"}</div>
+          <div class="dots">${this._statusDots()}</div>
+          ${settings ? "" : `<button class="ghost gear" data-act="settings" title="Einstellungen">⚙</button>`}
         </header>
         <div class="toast-slot"></div>
-        ${this._alerts()}
-        <section class="card hero live">${this._liveCard()}</section>
-        <div class="grid">
-          <section class="card audio">${this._audioCard()}</section>
-          <section class="card">${this._callerCard()}</section>
-          <section class="card">${this._boardCard()}</section>
-          <section class="card">${this._connCard()}</section>
-          <section class="card wide">${this._ledCard()}</section>
-        </div>
+        ${
+          settings
+            ? `<nav class="tabs">${tabs.map(([id, label]) => `<button class="${id === tab[0] ? "sel" : ""}" data-tab="${id}">${label}</button>`).join("")}</nav>
+               <section class="card sheet ${tab[0] === "audio" ? "audio" : ""}">${tab[2]()}</section>`
+            : `${this._alerts()}
+               <main class="stage live">${this._stage()}</main>
+               <div class="controls">${this._controls()}</div>`
+        }
       </div>`;
     this._menu();
     this._renderToast();
@@ -699,15 +794,20 @@ class GoveeDartsPanel extends HTMLElement {
   }
   _renderLive() {
     const el = this.shadowRoot.querySelector(".live");
-    if (el && this._info) el.innerHTML = this._liveCard();
+    if (el && this._info) el.innerHTML = this._stage();
   }
   _renderAudio() {
-    const el = this.shadowRoot.querySelector(".audio");
-    if (!el || !this._info) return;
+    if (!this._info) return;
     const active = this.shadowRoot.activeElement;
-    if (active && el.contains(active) && active.type === "range") return; // dragging the volume
-    el.innerHTML = this._audioCard();
-    this._bind(el);
+    for (const [sel, html] of [
+      [".controls", () => this._controls()],
+      [".audio", () => this._audioCard()],
+    ]) {
+      const el = this.shadowRoot.querySelector(sel);
+      if (!el || (active && el.contains(active) && /^(INPUT|SELECT)$/.test(active.tagName))) continue; // in use
+      el.innerHTML = html();
+      this._bind(el);
+    }
   }
 
   _bind(scope = this.shadowRoot) {
@@ -716,6 +816,9 @@ class GoveeDartsPanel extends HTMLElement {
     // audio (per browser)
     on("[data-audio=enabled]", "change", (ev) =>
       AUDIO.setEnabled(ev.target.checked).catch((err) => this._toast("error", `Ton konnte nicht starten: ${err.message || err}`)),
+    );
+    on("[data-audio=toggle]", "click", () =>
+      AUDIO.setEnabled(!AUDIO.enabled).catch((err) => this._toast("error", `Ton konnte nicht starten: ${err.message || err}`)),
     );
     on("[data-audio=resume]", "click", () => AUDIO.start().catch(ignore));
     on("[data-audio=sink]", "change", (ev) => {
@@ -730,13 +833,37 @@ class GoveeDartsPanel extends HTMLElement {
     );
     on("[data-audio=volume]", "input", (ev) => {
       AUDIO.setVolume(Number(ev.target.value));
-      const label = scope.querySelector(".vol") || this.shadowRoot.querySelector(".vol");
+      const label = ev.target.closest(".volbox")?.querySelector(".vol");
       if (label) label.textContent = `${ev.target.value} %`;
     });
     on("[data-audio=tone]", "click", () => AUDIO.testTone().catch((err) => this._toast("error", err.message || String(err))));
     // caller + board commands
     on("[data-cmd]", "click", (ev) => this._command(ev.currentTarget.dataset.cmd, ev.currentTarget.dataset.done).catch(ignore));
+    on("[data-led=enabled]", "change", (ev) => {
+      this._draft.enabled = ev.target.checked;
+      this._saveConfig()
+        .then(() => this._toast("ok", ev.target.checked ? "LED-Reaktionen an" : "LED-Reaktionen aus"))
+        .catch(() => this._render());
+    });
     if (scope !== this.shadowRoot) return;
+    // navigation
+    on("[data-act=settings]", "click", () => {
+      this._view = "settings";
+      this._render();
+    });
+    on("[data-act=back]", "click", () => {
+      this._view = "play";
+      this._render();
+    });
+    on("[data-tab]", "click", (ev) => {
+      this._tab = ev.currentTarget.dataset.tab;
+      this._render();
+    });
+    on("[data-open]", "click", (ev) => {
+      this._view = "settings";
+      this._tab = ev.currentTarget.dataset.open;
+      this._render();
+    });
     on("[data-opt]", "change", (ev) => {
       const t = ev.target;
       let value = t.value === "" ? null : t.dataset.opt === "voice" ? t.value : Number(t.value);
@@ -756,12 +883,6 @@ class GoveeDartsPanel extends HTMLElement {
     on("[data-led=entry_id]", "change", (ev) => {
       this._draft.entry_id = ev.target.value;
       dirty();
-    });
-    on("[data-led=enabled]", "change", (ev) => {
-      this._draft.enabled = ev.target.checked;
-      this._saveConfig()
-        .then(() => this._toast("ok", ev.target.checked ? "LED-Reaktionen an" : "LED-Reaktionen aus"))
-        .catch(() => this._render());
     });
     on("[data-rule]", "change", (ev) => {
       const id = ev.target.dataset.rule;
@@ -785,30 +906,34 @@ class GoveeDartsPanel extends HTMLElement {
 
 const STYLE = `
 :host{display:block;color:var(--primary-text-color);background:var(--primary-background-color);min-height:100vh;font-family:var(--paper-font-body1_-_font-family,Roboto,system-ui,sans-serif)}
-.page{max-width:1200px;margin:0 auto;padding:0 16px 40px}
-header{display:flex;align-items:center;gap:12px;min-height:56px;flex-wrap:wrap;position:sticky;top:0;z-index:2;background:var(--app-header-background-color,var(--primary-background-color));color:var(--app-header-text-color,var(--primary-text-color));margin:0 -16px;padding:6px 16px}
+.page{max-width:1100px;margin:0 auto;padding:0 16px 32px}
+.page.play{display:flex;flex-direction:column;min-height:100vh;box-sizing:border-box;padding-bottom:0}
+header{display:flex;align-items:center;gap:10px;min-height:56px;position:sticky;top:0;z-index:2;background:var(--app-header-background-color,var(--primary-background-color));color:var(--app-header-text-color,var(--primary-text-color));margin:0 -16px;padding:4px 16px}
 .title{font-size:20px;font-weight:500}
-.pills{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}
-.pill{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;padding:4px 10px;border-radius:999px;background:var(--secondary-background-color);border:1px solid var(--divider-color);white-space:nowrap}
-.pill i{width:8px;height:8px;border-radius:50%;background:var(--disabled-text-color,#888)}
-.pill.on i{background:var(--success-color,#2e7d32);box-shadow:0 0 0 3px color-mix(in srgb,var(--success-color,#2e7d32) 25%,transparent)}
-.pill.warn i{background:var(--warning-color,#f9a825)}
-.pill.bad i{background:var(--error-color,#c62828)}
-.card{background:var(--ha-card-background,var(--card-background-color));border-radius:var(--ha-card-border-radius,16px);padding:18px 20px;box-shadow:var(--ha-card-box-shadow,none);border:1px solid var(--divider-color);min-width:0}
-.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px}
-.card.wide{grid-column:1 / -1}
-@media (max-width:900px){.grid{grid-template-columns:1fr}}
-h2{font-size:17px;margin:0 0 10px;font-weight:500}
-h3{font-size:12px;text-transform:uppercase;letter-spacing:.07em;opacity:.6;margin:16px 0 8px;font-weight:500}
+.dots{display:flex;gap:14px;margin-left:auto;font-size:13px}
+.dot{display:inline-flex;align-items:center;gap:6px;opacity:.8}
+.dot i{width:9px;height:9px;border-radius:50%;background:var(--disabled-text-color,#888)}
+.dot.on i{background:var(--success-color,#2e7d32)}
+.dot.warn i{background:var(--warning-color,#f9a825)}
+.dot.bad i{background:var(--error-color,#c62828)}
+.dot.bad,.dot.warn{opacity:1}
+.ghost{background:none;border:none;font-size:20px;padding:6px 10px}
+.gear{margin-left:4px}
+@media (max-width:600px){.dot.on span{display:none}}
+.card{background:var(--ha-card-background,var(--card-background-color));border-radius:var(--ha-card-border-radius,16px);padding:18px 20px;border:1px solid var(--divider-color);min-width:0}
+h3{font-size:12px;text-transform:uppercase;letter-spacing:.07em;opacity:.6;margin:18px 0 8px;font-weight:500}
+h3:first-child{margin-top:0}
 .hint{font-size:13px;opacity:.7;margin:0 0 12px;line-height:1.45}
 .hint.small{font-size:12px;margin:10px 0 0}
+.small{font-size:13px}
 .warn{color:var(--warning-color,#f9a825);font-size:13px}
 a{color:var(--primary-color)}
 code{font-size:12px;background:var(--secondary-background-color);padding:1px 6px;border-radius:6px;word-break:break-word}
-button{font:inherit;font-size:14px;color:inherit;background:var(--secondary-background-color);border:1px solid var(--divider-color);border-radius:10px;padding:8px 12px;cursor:pointer;transition:border-color .15s,background .15s}
+button{font:inherit;font-size:14px;color:inherit;background:var(--secondary-background-color);border:1px solid var(--divider-color);border-radius:10px;padding:8px 14px;cursor:pointer;transition:border-color .15s,background .15s}
 button:hover:not(:disabled){border-color:var(--primary-color)}
 button:disabled{opacity:.4;cursor:default}
 button.primary{background:var(--primary-color);color:var(--text-primary-color,#fff);border-color:var(--primary-color)}
+button.ghost{background:none;border:none}
 .wide-btn{width:100%;margin-top:10px}
 select,input.text,input[type=number]{font:inherit;font-size:14px;padding:8px 10px;border-radius:10px;border:1px solid var(--divider-color);background:var(--secondary-background-color);color:inherit;min-width:0}
 .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
@@ -823,20 +948,45 @@ select,input.text,input[type=number]{font:inherit;font-size:14px;padding:8px 10p
 .toast.error{background:color-mix(in srgb,var(--error-color,#c62828) 18%,transparent)}
 .alert{margin-top:12px;padding:12px 16px;border-radius:14px;font-size:14px;line-height:1.6;background:color-mix(in srgb,var(--error-color,#c62828) 14%,transparent);border:1px solid color-mix(in srgb,var(--error-color,#c62828) 40%,transparent)}
 .alert.warn{color:inherit;background:color-mix(in srgb,var(--warning-color,#f9a825) 14%,transparent);border-color:color-mix(in srgb,var(--warning-color,#f9a825) 40%,transparent)}
-/* live */
-.hero{margin-top:16px;background:linear-gradient(135deg,color-mix(in srgb,var(--primary-color) 22%,var(--card-background-color)),var(--card-background-color) 70%)}
-.live-main{display:flex;justify-content:space-between;align-items:flex-end;gap:16px}
-.who{display:flex;flex-direction:column;gap:4px;min-width:0}
-.caption{font-size:12px;text-transform:uppercase;letter-spacing:.08em;opacity:.65;min-height:15px}
-.player{font-size:28px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.score{text-align:right;display:flex;flex-direction:column}
-.points{font-size:64px;line-height:1;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
-.darts{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:16px}
-.dart{height:58px;border-radius:14px;border:1px dashed var(--divider-color);display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:.55;font-size:18px}
-.dart.hit{opacity:1;border:1px solid color-mix(in srgb,var(--primary-color) 50%,transparent);background:color-mix(in srgb,var(--primary-color) 12%,transparent)}
-.dart b{font-size:20px}.dart span{font-size:12px;opacity:.7}
-.lastcall{margin-top:10px;font-size:13px;opacity:.75;min-height:18px}
-@media (max-width:600px){.points{font-size:48px}.player{font-size:22px}}
+.alert button{margin-left:8px;padding:4px 10px}
+details{margin-top:4px;font-size:12px}
+/* game view */
+.stage{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px;padding:24px 0}
+.visit{display:grid;grid-template-columns:repeat(3,1fr) auto;width:min(760px,100%);border-radius:16px;overflow:hidden;background:var(--ha-card-background,var(--card-background-color));border:1px solid var(--divider-color)}
+.slot{height:76px;display:flex;align-items:center;justify-content:center;font-size:clamp(24px,5vw,40px);font-weight:700;letter-spacing:.02em;font-variant-numeric:tabular-nums;color:var(--secondary-text-color)}
+.slot.hit{color:var(--primary-text-color)}
+.slot.total{min-width:110px;padding:0 20px;border-left:1px solid var(--divider-color);color:var(--primary-text-color)}
+.playercard{width:min(440px,100%);box-sizing:border-box;padding:22px 24px 26px;border-radius:22px;text-align:center;color:#fff;background:linear-gradient(135deg,#6a1b9a,#c2185b 60%,#e53935);box-shadow:0 18px 50px -20px rgba(194,24,91,.6);transition:background .3s}
+.playercard.idle{background:linear-gradient(135deg,color-mix(in srgb,var(--primary-color) 45%,#222),#333);box-shadow:none}
+.playercard.bust{background:linear-gradient(135deg,#b71c1c,#4a0000)}
+.playercard.won{background:linear-gradient(135deg,#f9a825,#2e7d32)}
+.tag{display:inline-flex;align-items:center;gap:8px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;font-size:15px;background:rgba(0,0,0,.35);padding:6px 14px;border-radius:999px}
+.tag i{width:8px;height:8px;border-radius:50%;background:#fff}
+.points{font-size:clamp(80px,16vw,132px);line-height:1;font-weight:800;letter-spacing:-.03em;font-variant-numeric:tabular-nums;margin:12px 0 6px}
+.sub{font-size:16px;min-height:22px;opacity:.9;display:flex;gap:10px;justify-content:center;align-items:center}
+.finish{display:flex;gap:8px;justify-content:center;margin:2px 0 12px}
+.finish span{font-size:20px;font-weight:700;padding:6px 14px;border-radius:12px;background:rgba(255,255,255,.18);font-variant-numeric:tabular-nums}
+.finish span:last-child{background:#fff;color:#7b1f4a}
+.finish.none{font-size:14px;opacity:.85}
+.mode{font-size:12px;padding:2px 8px;border-radius:999px;background:rgba(0,0,0,.3)}
+.lastcall{font-size:14px;opacity:.7;min-height:20px}
+/* bottom bar */
+.controls{position:sticky;bottom:0;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;margin:0 -16px;background:var(--ha-card-background,var(--card-background-color));border-top:1px solid var(--divider-color)}
+.controls .spacer{flex:1}
+.controls .full{flex-basis:100%;margin:0}
+.round{width:44px;height:44px;border-radius:50%;padding:0;font-size:20px}
+.round.on{border-color:var(--primary-color);background:color-mix(in srgb,var(--primary-color) 20%,transparent)}
+.sink{max-width:220px}
+.volbox{display:flex;align-items:center;gap:8px}
+.controls .volbox input{width:120px}
+.vol{font-size:12px;font-weight:500;opacity:.8;min-width:38px}
+.field.volbox{align-items:stretch}
+@media (max-width:600px){.controls .volbox{display:none}.sink{max-width:150px}}
+/* settings */
+.tabs{display:flex;gap:6px;margin:12px 0;overflow-x:auto}
+.tabs button{border-radius:999px;white-space:nowrap}
+.tabs button.sel{background:var(--primary-color);color:var(--text-primary-color,#fff);border-color:var(--primary-color)}
+.sheet{max-width:900px}
 /* switches */
 .switch{display:inline-flex;align-items:center;gap:10px;cursor:pointer;font-size:14px;user-select:none}
 .switch input{position:absolute;opacity:0;pointer-events:none}
@@ -846,8 +996,7 @@ select,input.text,input[type=number]{font:inherit;font-size:14px;padding:8px 10p
 .switch input:checked + span::after{transform:translateX(18px)}
 .switch input:disabled + span{opacity:.4}
 .switch input:focus-visible + span{outline:2px solid var(--primary-color);outline-offset:2px}
-.switch.big{font-size:15px;font-weight:500;margin:4px 0}
-.vol{font-size:12px;font-weight:500;opacity:.8}
+.switch.big{font-size:15px;font-weight:500;margin:4px 0 10px}
 input[type=range]{width:100%;accent-color:var(--primary-color)}
 /* caller */
 .voice{display:flex;gap:8px}
@@ -856,11 +1005,9 @@ input[type=range]{width:100%;accent-color:var(--primary-color)}
 .star.on{color:var(--warning-color,#f9a825)}
 .opts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 14px}
 @media (max-width:600px){.opts{grid-template-columns:1fr}}
-.board{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px}
+.board{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-bottom:8px}
 .board button{padding:12px}
 /* LED */
-.card-head{display:flex;justify-content:space-between;align-items:center;gap:12px}
-.card-head h2{margin:0}
 .groups{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:4px 28px;transition:opacity .2s}
 .groups.dim{opacity:.55}
 .row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr) 72px 34px 34px;gap:6px;align-items:center;font-size:14px;margin-bottom:6px;padding:2px 4px;border-radius:10px}
