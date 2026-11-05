@@ -91,6 +91,88 @@ function checkout(points, dartsLeft = 3) {
 }
 
 // ---------------------------------------------------------------------------------
+// Dartboard (SVG, millimetres, standard tournament dimensions; 20 at the top).
+// ---------------------------------------------------------------------------------
+const SEGMENTS = [20, 1, 18, 4, 13, 6, 10, 15, 2, 17, 3, 19, 7, 16, 8, 11, 14, 9, 12, 5];
+const R = { bull: 6.35, outerBull: 15.9, tripleIn: 99, tripleOut: 107, doubleIn: 162, doubleOut: 170, numbers: 192, rim: 214 };
+// Board Manager beds -> ring radii; darts-caller field prefixes as a fallback.
+const BEDS = {
+  SingleInner: [R.outerBull, R.tripleIn],
+  SingleOuter: [R.tripleOut, R.doubleIn],
+  Triple: [R.tripleIn, R.tripleOut],
+  Double: [R.doubleIn, R.doubleOut],
+};
+const PREFIX_BEDS = { s: ["SingleInner", "SingleOuter"], t: ["Triple"], d: ["Double"] };
+
+const polar = (r, deg) => {
+  const a = ((deg - 90) * Math.PI) / 180;
+  return [+(r * Math.cos(a)).toFixed(2), +(r * Math.sin(a)).toFixed(2)];
+};
+// Annular sector between radii r1..r2, centred on the segment index.
+function sector(index, r1, r2) {
+  const a1 = index * 18 - 9;
+  const a2 = a1 + 18;
+  const [x1, y1] = polar(r2, a1);
+  const [x2, y2] = polar(r2, a2);
+  const [x3, y3] = polar(r1, a2);
+  const [x4, y4] = polar(r1, a1);
+  return `M${x1} ${y1}A${r2} ${r2} 0 0 1 ${x2} ${y2}L${x3} ${y3}A${r1} ${r1} 0 0 0 ${x4} ${y4}Z`;
+}
+
+const BOARD_SVG = (() => {
+  let parts = `<circle r="${R.rim}" class="b-rim"/>`;
+  SEGMENTS.forEach((n, i) => {
+    const dark = i % 2 === 0;
+    const single = dark ? "b-dark" : "b-light";
+    const ring = dark ? "b-red" : "b-green";
+    parts += `<path d="${sector(i, R.doubleIn, R.doubleOut)}" class="${ring}"/>`;
+    parts += `<path d="${sector(i, R.tripleOut, R.doubleIn)}" class="${single}"/>`;
+    parts += `<path d="${sector(i, R.tripleIn, R.tripleOut)}" class="${ring}"/>`;
+    parts += `<path d="${sector(i, R.outerBull, R.tripleIn)}" class="${single}"/>`;
+    const [x, y] = polar(R.numbers, i * 18);
+    parts += `<text x="${x}" y="${y}" class="b-num">${n}</text>`;
+  });
+  parts += `<circle r="${R.outerBull}" class="b-green"/><circle r="${R.bull}" class="b-red"/>`;
+  parts += `<circle r="${R.doubleOut}" class="b-wire"/>`;
+  return parts;
+})();
+
+// Highlight for one dart: from Board Manager data (bed + number) or a field name like "t20".
+function hitArea(dart) {
+  let number = dart.number;
+  let beds = dart.bed ? [dart.bed] : [];
+  if (!number && dart.field) {
+    const m = /^([sdtm])(\d+)$/i.exec(dart.field);
+    if (!m || m[1].toLowerCase() === "m") return "";
+    number = Number(m[2]);
+    beds = PREFIX_BEDS[m[1].toLowerCase()] || [];
+  }
+  if (number === 25) {
+    // Bullseye (50) is the "double" of 25: d25 from darts-caller, bed Double or name Bull/D25 from the board.
+    const inner = dart.field ? /^d/i.test(dart.field) : dart.bed === "Double" || /^(bull|d25)$/i.test(dart.name || "");
+    return `<circle r="${inner ? R.bull : R.outerBull}" class="b-hit"/>`;
+  }
+  const index = SEGMENTS.indexOf(number);
+  if (index < 0) return "";
+  return beds
+    .filter((b) => BEDS[b])
+    .map((b) => `<path d="${sector(index, ...BEDS[b])}" class="b-hit"/>`)
+    .join("");
+}
+
+function boardSvg(throws, darts) {
+  // Positions need the Board Manager; without it only the hit fields are shown.
+  const source = throws.length ? throws : darts.map((d) => ({ field: d.field }));
+  const last = source[source.length - 1];
+  const marks = throws
+    .map((t, i) => `<circle cx="${(t.x * R.doubleOut).toFixed(1)}" cy="${(-t.y * R.doubleOut).toFixed(1)}" r="5.5" class="b-dart ${i === throws.length - 1 ? "last" : ""}"/>`)
+    .join("");
+  return `<svg viewBox="-220 -220 440 440" class="board-svg" role="img" aria-label="Dartscheibe">
+    ${BOARD_SVG}${last ? hitArea(last) : ""}${marks}
+  </svg>`;
+}
+
+// ---------------------------------------------------------------------------------
 // Caller audio: lives as long as the browser tab, not just while the panel is shown,
 // so the caller keeps talking while you use other Home Assistant pages.
 // ---------------------------------------------------------------------------------
@@ -396,6 +478,9 @@ class GoveeDartsPanel extends HTMLElement {
       this._info.status.game = ev.game;
       this._gameAt = Date.now();
       this._renderLive();
+    } else if (ev.type === "throws") {
+      this._info.status.throws = ev.throws;
+      this._renderLive();
     } else if (ev.type === "play") {
       this._renderLive();
     }
@@ -571,12 +656,16 @@ class GoveeDartsPanel extends HTMLElement {
         : "";
     const bad = g.event === "busted";
     const won = g.event === "game-won" || g.event === "match-won";
+    const throws = this._info.status.throws || [];
     return `<div class="visit">${slots}<div class="slot total">${esc(total)}</div></div>
+      <div class="arena">
       <div class="playercard ${bad ? "bust" : ""} ${won ? "won" : ""} ${has ? "" : "idle"}">
         <div class="tag">${has && g.player ? `<i></i>${esc(g.player)}` : "Kein laufendes Spiel"}</div>
         <div class="points">${has && g.points_left != null ? esc(g.points_left) : "–"}</div>
         ${finish}
         <div class="sub">${esc(label)}${g.mode ? `<span class="mode">${esc(g.mode)}</span>` : ""}</div>
+      </div>
+      <div class="board-wrap">${boardSvg(throws, has ? darts : [])}</div>
       </div>
       <div class="lastcall">${AUDIO.enabled && AUDIO.lastCall ? `🔊 ${esc(AUDIO.lastCall)}` : ""}</div>`;
   }
@@ -986,6 +1075,22 @@ details{margin-top:4px;font-size:12px}
 .slot{height:76px;display:flex;align-items:center;justify-content:center;font-size:clamp(24px,5vw,40px);font-weight:700;letter-spacing:.02em;font-variant-numeric:tabular-nums;color:var(--secondary-text-color)}
 .slot.hit{color:var(--primary-text-color)}
 .slot.total{min-width:110px;padding:0 20px;border-left:1px solid var(--divider-color);color:var(--primary-text-color)}
+.arena{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:32px;align-items:center;width:100%}
+.arena .playercard{justify-self:end}
+@media (max-width:800px){.arena{grid-template-columns:1fr}.arena .playercard{justify-self:center}}
+.board-wrap{width:min(520px,100%);justify-self:start}
+@media (max-width:800px){.board-wrap{justify-self:center}}
+.board-svg{width:100%;height:auto;display:block;filter:drop-shadow(0 0 24px color-mix(in srgb,var(--success-color,#2e7d32) 25%,transparent))}
+.b-rim{fill:#141414;stroke:color-mix(in srgb,var(--success-color,#43a047) 70%,#fff);stroke-width:2.5}
+.b-dark{fill:#1b1b1b;stroke:#8a8a8a;stroke-width:.6}
+.b-light{fill:#eadcc2;stroke:#8a8a8a;stroke-width:.6}
+.b-red{fill:#d23a3f;stroke:#8a8a8a;stroke-width:.6}
+.b-green{fill:#2f8f4e;stroke:#8a8a8a;stroke-width:.6}
+.b-wire{fill:none;stroke:#9a9a9a;stroke-width:1}
+.b-num{fill:#f2f2f2;font:700 19px system-ui,sans-serif;text-anchor:middle;dominant-baseline:central}
+.b-hit{fill:var(--primary-color);fill-opacity:.55;stroke:#fff;stroke-width:1.2}
+.b-dart{fill:#fff;stroke:var(--primary-color);stroke-width:3}
+.b-dart.last{fill:var(--primary-color);stroke:#fff}
 .playercard{width:min(440px,100%);box-sizing:border-box;padding:22px 24px 26px;border-radius:22px;text-align:center;color:#fff;background:linear-gradient(135deg,#6a1b9a,#c2185b 60%,#e53935);box-shadow:0 18px 50px -20px rgba(194,24,91,.6);transition:background .3s}
 .playercard.idle{background:linear-gradient(135deg,color-mix(in srgb,var(--primary-color) 45%,#222),#333);box-shadow:none}
 .playercard.bust{background:linear-gradient(135deg,#b71c1c,#4a0000)}

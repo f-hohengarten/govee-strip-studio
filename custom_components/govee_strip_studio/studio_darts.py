@@ -45,6 +45,7 @@ from .darts_rules import (
     TRIGGER_GROUPS,
     TRIGGERS,
     Reaction,
+    board_throws,
     duration_of,
     game_update,
     idle_candidates,
@@ -73,6 +74,7 @@ PANEL_PATH = "darts"
 PANEL_ELEMENT = "govee-darts-panel"
 SOUND_URL = f"/api/{DOMAIN}/darts/sound"
 AUTH_POLL_SECONDS = 60
+BOARD_MANAGER_PORT = 3180  # Autodarts Board Manager on the darts-caller computer: dart coordinates
 MAX_SOUND_BYTES = 8 * 1024 * 1024
 _DATA = f"{DOMAIN}_darts"
 # Caller-internal messages that are not game events (no bus event, no LED reaction).
@@ -124,6 +126,8 @@ class DartsController:
         self.callers: dict[str, Any] = {}  # from darts-caller's "welcome"
         self.autodarts: dict[str, Any] | None = None  # darts-caller's own Autodarts login
         self.game: dict[str, Any] = {}
+        self.throws: list[dict[str, Any]] = []  # current visit with board coordinates
+        self._board_task: asyncio.Task | None = None
         self.listeners: set[Callable[[dict[str, Any]], None]] = set()
         self._revert: asyncio.TimerHandle | None = None
         self._generation = 0  # bumped by every event; a stale revert must not undo a newer effect
@@ -145,6 +149,7 @@ class DartsController:
             "callers": self.callers,
             "autodarts": self.autodarts,
             "game": self.game,
+            "throws": self.throws,
         }
 
     def _broadcast(self, payload: dict[str, Any]) -> None:
@@ -166,7 +171,7 @@ class DartsController:
             self._notify()
             return
         await self.async_stop()
-        self.callers, self.autodarts, self.game = {}, None, {}
+        self.callers, self.autodarts, self.game, self.throws = {}, None, {}, []
         if not cfg.get("host"):
             self._notify()
             return
@@ -299,6 +304,8 @@ class DartsController:
         )
         if game_update(self.game, msg):
             self._broadcast({"type": "game", "game": self.game})
+        if str(event).startswith("dart") or event in ("Board Status", "match-started", "match-ended"):
+            self._schedule_board()
         reaction = react(msg)
         if reaction.player is not None:
             self.player = reaction.player
@@ -307,6 +314,28 @@ class DartsController:
         if reaction.kind != "none" and self.config.get("enabled") and self.config.get("entry_id"):
             self._generation += 1
             self.hass.async_create_task(self._handle(reaction, self._generation))
+
+    def _schedule_board(self) -> None:
+        """Fetch the dart positions; a fetch already running picks up the newest state."""
+        if self._board_task is None or self._board_task.done():
+            self._board_task = self.hass.async_create_task(self._refresh_board())
+
+    async def _refresh_board(self) -> None:
+        feed = self.feed
+        if feed is None:
+            return
+        try:
+            async with async_get_clientsession(self.hass).get(
+                f"http://{feed.host}:{BOARD_MANAGER_PORT}/api/state", timeout=aiohttp.ClientTimeout(total=3)
+            ) as resp:
+                state = await resp.json(content_type=None) if resp.status == 200 else None
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+            _LOGGER.debug("Autodarts Board Manager not reachable: %s", err)
+            return  # the board view falls back to the field names from darts-caller
+        throws = board_throws(state)
+        if throws != self.throws:
+            self.throws = throws
+            self._broadcast({"type": "throws", "throws": throws})
 
     async def async_simulate(self, trigger: str) -> None:
         """Play one rule as if its event had happened (panel test buttons)."""

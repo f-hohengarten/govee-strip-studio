@@ -203,3 +203,19 @@ def test_mirror_files_are_normalised():
     )
     assert [f["name"] for f in files] == ["18.mp3", "bust.mp3"]
     assert files[1]["wait"] is True and files[1]["volume"] == 2.0
+
+
+def test_board_throws_from_board_manager_state():
+    state = {
+        "status": "throw",
+        "throws": [
+            {"bed": "SingleOuter", "coordsX": 0.2013, "coordsY": 0.6150, "segmentName": "S1", "segmentNumber": 1},
+            {"bed": "Triple", "coordsX": -0.046, "coordsY": 0.579, "segmentName": "T20", "segmentNumber": 20},
+            {"bed": "Double", "coordsX": "x", "coordsY": 1},
+            {"bed": "Outside", "coordsX": 9, "coordsY": 0},
+        ],
+    }
+    throws = rules.board_throws(state)
+    assert [t["name"] for t in throws] == ["S1", "T20"]
+    assert throws[0] == {"x": 0.2013, "y": 0.615, "name": "S1", "bed": "SingleOuter", "number": 1}
+    assert rules.board_throws({"throws": []}) == [] and rules.board_throws("nope") == []

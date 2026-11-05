@@ -233,3 +233,37 @@ def game_update(game: dict[str, Any], msg: dict[str, Any]) -> bool:
         game["visit"] = info.get("dartsThrownValue", game.get("visit"))
     game["event"] = event
     return True
+
+
+def board_throws(state: Any) -> list[dict[str, Any]]:
+    """The current visit's darts from the Autodarts Board Manager (``GET /api/state``).
+
+    Coordinates are in units of the double ring's outer edge (170 mm), y pointing up;
+    ``bed`` names the ring (SingleInner, Triple, …) and ``number`` the segment (25 = bull).
+    """
+    if not isinstance(state, dict) or not isinstance(state.get("throws"), list):
+        return []
+    out = []
+    for item in state["throws"][:3]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            x, y = float(item["coordsX"]), float(item["coordsY"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (-2 <= x <= 2 and -2 <= y <= 2):
+            continue
+        try:
+            number = int(item.get("segmentNumber") or 0)
+        except (TypeError, ValueError):
+            number = 0
+        out.append(
+            {
+                "x": round(x, 4),
+                "y": round(y, 4),
+                "name": str(item.get("segmentName") or "")[:8],
+                "bed": str(item.get("bed") or "")[:16],
+                "number": number if 0 <= number <= 25 else 0,
+            }
+        )
+    return out
