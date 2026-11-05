@@ -679,7 +679,7 @@ class GoveeStripStudioPanel extends HTMLElement {
 
         <div class="grid">
           ${dartsOn ? this._dartsCard() : ""}
-          <section class="card editor">
+          <section class="card wide editor">
             <h2>Effekt</h2>
             <div class="types">${TYPES.map(
               (t) => `<button class="type ${e.type === t.id ? "sel" : ""}" data-type="${t.id}"><ha-icon icon="${t.icon}"></ha-icon><span>${t.label}</span></button>`,
@@ -712,7 +712,7 @@ class GoveeStripStudioPanel extends HTMLElement {
             ${this._sliders()}
           </section>
 
-          <section class="card">
+          <section class="card wide">
             <h2>Streifen</h2>
             <p class="hint">Lege fest, welcher Teil deines Streifens tatsächlich vorhanden ist und wo seine Mitte liegt. Klicke einen Chip an: erst <b>Anfang</b>, dann <b>Ende</b>. Mit „Zentrum setzen“ wählst du die Mitte frei.</p>
             <div class="geo">${this._icCells(dev)}</div>
@@ -822,7 +822,7 @@ class GoveeStripStudioPanel extends HTMLElement {
           ? ""
           : `<label class="row"><span>Pinsel-Helligkeit</span><input type="range" min="1" max="100" value="${this._brushLevel}" data-brush-level/><em>${this._brushLevel} %</em></label>`
       }
-      <div class="paint ${this._native() ? "fine" : ""}">${pos.map((_, i) => this._segButton(i)).join("")}</div>
+      <div class="paint" style="--cells:${pos.length};--cells-narrow:${Math.ceil(pos.length / 2)}">${pos.map((_, i) => this._segButton(i)).join("")}</div>
       <div class="actions small">
         <button data-act="fill-all">Alle wie Pinsel</button>
         <button data-act="clear-all">Alle aus</button>
@@ -1157,12 +1157,12 @@ input[type=color]::-moz-color-swatch{border:2px solid var(--divider-color);borde
 .row input[type=range]{width:100%;accent-color:var(--primary-color)}
 .brush{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
 .tools{display:flex;gap:6px;flex-wrap:wrap}
-.paint{display:flex;gap:4px;flex-wrap:wrap;touch-action:none;user-select:none;-webkit-user-select:none;margin-top:10px}
-.seg{flex:1 0 34px;height:44px;border-radius:8px;padding:0;font-size:12px;text-shadow:0 0 3px #000;color:#fff;background-image:none;display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1.1}
+.paint{display:grid;grid-template-columns:repeat(var(--cells),minmax(0,1fr));gap:3px;touch-action:none;user-select:none;-webkit-user-select:none;margin-top:10px}
+@media (max-width:900px){.paint{grid-template-columns:repeat(var(--cells-narrow),minmax(0,1fr))}}
+.seg{min-width:0;height:44px;border-radius:8px;padding:0;font-size:12px;text-shadow:0 0 3px #000;color:#fff;background-image:none;display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1.1}
 .seg.off{background:repeating-linear-gradient(45deg,transparent 0 5px,color-mix(in srgb,var(--divider-color) 60%,transparent) 5px 7px)!important;color:var(--secondary-text-color);text-shadow:none}
 .seg small{font-size:10px;opacity:.9}
-.paint.fine{gap:3px}
-.paint.fine .seg{flex-basis:30px;font-size:11px}
+
 .geo{display:grid;grid-template-columns:repeat(auto-fill,minmax(26px,1fr));gap:3px}
 .ic{height:30px;padding:0;border-radius:6px;font-size:11px;font-weight:600;position:relative;background:var(--secondary-background-color);opacity:.45}
 .ic.on{opacity:1;background:color-mix(in srgb,var(--primary-color) 30%,var(--secondary-background-color))}
