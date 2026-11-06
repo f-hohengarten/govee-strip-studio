@@ -39,6 +39,7 @@ from .effect_setup import get_effect_backend
 from .darts_presets import DARTS_GROUP, PRESETS
 from .generated_protocol_adapter import build_power
 from .light_commands import build_segment_color
+from .studio_choreo import ChoreoError, validate_choreo
 from .studio_darts import DEFAULT_CONFIG as DEFAULT_DARTS
 from .studio_darts import DartsController, async_setup_darts
 from .studio_darts import validate_config as validate_darts_config
@@ -56,7 +57,7 @@ from .studio_render import (
 
 _LOGGER = logging.getLogger(__name__)
 
-STUDIO_VERSION = "0.3.2"
+STUDIO_VERSION = "0.4.0"
 STORE_KEY = f"{DOMAIN}.strip_studio"
 STORE_VERSION = 1
 PANEL_PATH = "strip-studio"
@@ -107,8 +108,11 @@ class StripStudio:
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
         self.store: Store[dict[str, Any]] = Store(hass, STORE_VERSION, STORE_KEY)
-        self.data: dict[str, Any] = {"geometry": {}, "effects": {}, "darts": dict(DEFAULT_DARTS)}
+        self.data: dict[str, Any] = {"geometry": {}, "effects": {}, "choreos": {}, "darts": dict(DEFAULT_DARTS)}
         self.players: dict[str, _Player] = {}
+        # Running choreo per entry: its task and the progress shown in the panel.
+        self.choreo_tasks: dict[str, asyncio.Task] = {}
+        self.choreo_state: dict[str, dict[str, Any]] = {}
         # Effects the strip is animating by itself (native playback), per entry.
         self.native: dict[str, dict[str, Any]] = {}
         # Live edits while an upload runs: only the newest one is sent next.
@@ -123,6 +127,7 @@ class StripStudio:
         if isinstance(stored, dict):
             self.data["geometry"] = dict(stored.get("geometry", {}))
             self.data["effects"] = dict(stored.get("effects", {}))
+            self.data["choreos"] = dict(stored.get("choreos", {}))
             for effect_id, item in self.data["effects"].items():
                 # Presets installed before effects had groups (0.2.2) are darts effects.
                 if effect_id in PRESETS and isinstance(item, dict) and "group" not in item:
@@ -187,6 +192,7 @@ class StripStudio:
             "light_entity_id": self.light_entity_id(entry_id),
             "player": player.status() if player else None,
             "native": self.native.get(entry_id),
+            "choreo": self.choreo_state.get(entry_id),
         }
 
     # -- playback ----------------------------------------------------------------
@@ -201,14 +207,20 @@ class StripStudio:
     async def async_play(
         self, entry_id: str, effect: Effect, *, name: str | None = None, live: bool = False
     ) -> None:
-        """Play ``effect``.  ``live`` updates a running player in place.
+        """Play ``effect``, ending a running choreo.  ``live`` updates a running player in place.
 
         In-place updates keep the animation clock and the last written frame, so only
         the segments that actually change are sent.  A normal play repaints everything,
         which also recovers from any change made to the strip outside the studio.
         """
+        await self._cancel_choreo(entry_id)
+        await self._play_effect(entry_id, effect, name=name, live=live)
+
+    async def _play_effect(
+        self, entry_id: str, effect: Effect, *, name: str | None = None, live: bool = False
+    ) -> None:
         if effect.playback == "native":
-            await self.async_stop(entry_id, notify=False)
+            await self._stop_player(entry_id, notify=False)
             if live:
                 self._native_next[entry_id] = (effect, name)
                 worker = self._native_workers.get(entry_id)
@@ -230,7 +242,7 @@ class StripStudio:
             player.changed.set()
             self._notify(entry_id)
             return
-        await self.async_stop(entry_id, notify=False)
+        await self._stop_player(entry_id, notify=False)
         coordinator = self.coordinator(entry_id)
         player = _Player(entry_id=entry_id, effect=effect, name=name)
         self.players[entry_id] = player
@@ -313,6 +325,11 @@ class StripStudio:
         coordinator.async_update_listeners()
 
     async def async_stop(self, entry_id: str, *, notify: bool = True) -> None:
+        """Stop the player and any running choreo; the strip keeps its last frame."""
+        await self._cancel_choreo(entry_id)
+        await self._stop_player(entry_id, notify=notify)
+
+    async def _stop_player(self, entry_id: str, *, notify: bool = True) -> None:
         player = self.players.get(entry_id)
         if player is not None and player.task is not None and not player.task.done():
             player.task.cancel()
@@ -322,6 +339,67 @@ class StripStudio:
                 pass
         if notify and entry_id in self.players:
             self._notify(entry_id)
+
+    # -- choreos -----------------------------------------------------------------
+    async def async_play_choreo(self, entry_id: str, choreo_id: str) -> None:
+        """Play a saved choreo; it ends on its own, on stop, on light-off or on any other play."""
+        choreo = self.data["choreos"].get(choreo_id)
+        if choreo is None:
+            raise StudioValidationError("unknown choreo")
+        self.coordinator(entry_id)  # fail now, not inside the background task
+        await self._cancel_choreo(entry_id)
+        self.choreo_state[entry_id] = {"id": choreo_id, "name": choreo["name"], "step": 0, "steps": len(choreo["steps"])}
+        self.choreo_tasks[entry_id] = self.hass.async_create_background_task(
+            self._run_choreo(entry_id, choreo), f"{DOMAIN} strip studio choreo {entry_id}"
+        )
+        self._watch_light(entry_id)
+        self._notify(entry_id)
+
+    async def _cancel_choreo(self, entry_id: str) -> None:
+        task = self.choreo_tasks.pop(entry_id, None)
+        self.choreo_state.pop(entry_id, None)
+        if task is None or task is asyncio.current_task() or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001 - shutdown of our own task
+            pass
+
+    async def _run_choreo(self, entry_id: str, choreo: dict[str, Any]) -> None:
+        state = self.choreo_state[entry_id]
+        try:
+            while True:
+                played = False
+                for index, step in enumerate(choreo["steps"]):
+                    saved = self.data["effects"].get(step["effect_id"])
+                    if saved is None:  # effect deleted after the choreo was saved
+                        continue
+                    state["step"] = index + 1
+                    try:
+                        await self._play_effect(entry_id, Effect.from_dict(saved["effect"]), name=saved["name"])
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as err:  # noqa: BLE001 - one bad step must not end the show
+                        state["error"] = str(err) or type(err).__name__
+                        _LOGGER.warning("Choreo %s, step %s: %s", choreo["name"], index + 1, state["error"])
+                    else:
+                        played = True
+                        state.pop("error", None)
+                    self._notify(entry_id)
+                    await asyncio.sleep(step["seconds"])
+                if choreo["end"] != "loop" or not played:
+                    break
+        finally:
+            if self.choreo_tasks.get(entry_id) is asyncio.current_task():
+                del self.choreo_tasks[entry_id]
+                self.choreo_state.pop(entry_id, None)
+        # Reached only when the choreo ran to its end (not when it was cancelled).
+        if choreo["end"] == "stop":
+            await self._stop_player(entry_id, notify=False)
+        elif choreo["end"] == "off" and (entity_id := self.light_entity_id(entry_id)) is not None:
+            await self.hass.services.async_call("light", "turn_off", {"entity_id": entity_id}, blocking=True)
+        self._notify(entry_id)
 
     def _watch_light(self, entry_id: str) -> None:
         if entry_id in self._state_unsubs:
@@ -335,7 +413,8 @@ class StripStudio:
             new = event.data.get("new_state")
             if new is not None and new.state == "off":
                 player = self.players.get(entry_id)
-                if player is not None and player.task is not None and not player.task.done():
+                playing = player is not None and player.task is not None and not player.task.done()
+                if playing or entry_id in self.choreo_tasks:
                     self.hass.async_create_task(self.async_stop(entry_id))
 
         self._state_unsubs[entry_id] = async_track_state_change_event(self.hass, [entity_id], _changed)
@@ -448,6 +527,7 @@ def ws_info(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg
             "directions": list(DIRECTIONS),
             "devices": devices,
             "effects": studio.data["effects"],
+            "choreos": studio.data["choreos"],
         },
     )
 
@@ -493,10 +573,11 @@ async def ws_geometry_set(
         await studio.async_save()
         player = studio.players.get(msg["entry_id"])
         native = studio.native.get(msg["entry_id"])
+        # Repaint with the new geometry; a running choreo carries on.
         if player is not None and player.task is not None and not player.task.done():
-            await studio.async_play(msg["entry_id"], player.effect, name=player.name)
+            await studio._play_effect(msg["entry_id"], player.effect, name=player.name)
         elif native is not None:
-            await studio.async_play(msg["entry_id"], Effect.from_dict(native["effect"]), name=native["name"])
+            await studio._play_effect(msg["entry_id"], Effect.from_dict(native["effect"]), name=native["name"])
     except Exception as err:  # noqa: BLE001
         _error(connection, msg["id"], err)
         return
@@ -509,6 +590,7 @@ async def ws_geometry_set(
         vol.Required("entry_id"): str,
         vol.Optional("effect"): dict,
         vol.Optional("effect_id"): str,
+        vol.Optional("choreo_id"): str,
         vol.Optional("live", default=False): bool,
     }
 )
@@ -518,6 +600,10 @@ async def ws_play(hass: HomeAssistant, connection: websocket_api.ActiveConnectio
     studio = _studio(hass)
     try:
         name = None
+        if "choreo_id" in msg:
+            await studio.async_play_choreo(msg["entry_id"], msg["choreo_id"])
+            connection.send_result(msg["id"], studio.device_info(msg["entry_id"]))
+            return
         if "effect_id" in msg:
             saved = studio.data["effects"].get(msg["effect_id"])
             if saved is None:
@@ -587,6 +673,43 @@ async def ws_effect_delete(
 
 
 @websocket_api.websocket_command(
+    {vol.Required("type"): f"{WS}/choreos/save", vol.Optional("choreo_id"): str, vol.Required("choreo"): dict}
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_choreo_save(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    studio = _studio(hass)
+    try:
+        choreo = validate_choreo(msg["choreo"], frozenset(studio.data["effects"]))
+    except ChoreoError as err:
+        _error(connection, msg["id"], err)
+        return
+    choreo_id = msg.get("choreo_id") or uuid.uuid4().hex[:12]
+    studio.data["choreos"][choreo_id] = choreo
+    await studio.async_save()
+    connection.send_result(msg["id"], {"choreo_id": choreo_id, "choreos": studio.data["choreos"]})
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{WS}/choreos/delete", vol.Required("choreo_id"): str}
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_choreo_delete(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    studio = _studio(hass)
+    for entry_id, state in list(studio.choreo_state.items()):
+        if state.get("id") == msg["choreo_id"]:
+            await studio.async_stop(entry_id)
+    studio.data["choreos"].pop(msg["choreo_id"], None)
+    await studio.async_save()
+    connection.send_result(msg["id"], {"choreos": studio.data["choreos"]})
+
+
+@websocket_api.websocket_command(
     {
         vol.Required("type"): f"{WS}/benchmark",
         vol.Required("entry_id"): str,
@@ -614,24 +737,34 @@ def _entry_id(entity: Any) -> str:
     return entity.coordinator.config_entry.entry_id
 
 
-def _find_effect(studio: StripStudio, wanted: str) -> tuple[str, dict[str, Any]]:
-    """Saved effect by id or by name (case and surrounding spaces ignored)."""
-    effects = studio.data["effects"]
-    if wanted in effects:
-        return wanted, effects[wanted]
+def _find_saved(studio: StripStudio, wanted: str) -> tuple[str, str, dict[str, Any]]:
+    """("effects" | "choreos", id, item) by id or by name (case and surrounding spaces ignored).
+
+    Effects win over choreos of the same name.
+    """
     key = wanted.strip().casefold()
-    for effect_id, item in effects.items():
-        if str(item.get("name", "")).strip().casefold() == key:
-            return effect_id, item
-    names = ", ".join(sorted(str(item.get("name")) for item in effects.values())) or "none"
-    raise ServiceValidationError(f"No Strip Studio effect named '{wanted}'. Saved effects: {names}")
+    for kind in ("effects", "choreos"):
+        saved = studio.data[kind]
+        if wanted in saved:
+            return kind, wanted, saved[wanted]
+        for item_id, item in saved.items():
+            if str(item.get("name", "")).strip().casefold() == key:
+                return kind, item_id, item
+    effects = ", ".join(sorted(str(item.get("name")) for item in studio.data["effects"].values())) or "none"
+    choreos = ", ".join(sorted(str(item.get("name")) for item in studio.data["choreos"].values())) or "none"
+    raise ServiceValidationError(
+        f"No Strip Studio effect or choreo named '{wanted}'. Saved effects: {effects}. Saved choreos: {choreos}"
+    )
 
 
 async def _service_play(entity: Any, call: ServiceCall) -> None:
     studio = _studio(call.hass)
-    _effect_id, item = _find_effect(studio, call.data["effect"])
+    kind, item_id, item = _find_saved(studio, call.data["effect"])
     try:
-        await studio.async_play(_entry_id(entity), Effect.from_dict(item["effect"]), name=item.get("name"))
+        if kind == "choreos":
+            await studio.async_play_choreo(_entry_id(entity), item_id)
+        else:
+            await studio.async_play(_entry_id(entity), Effect.from_dict(item["effect"]), name=item.get("name"))
     except StudioValidationError as err:
         raise ServiceValidationError(str(err)) from err
 
@@ -683,6 +816,8 @@ async def async_setup_strip_studio(hass: HomeAssistant) -> None:
         ws_stop,
         ws_effect_save,
         ws_effect_delete,
+        ws_choreo_save,
+        ws_choreo_delete,
         ws_benchmark,
     ):
         websocket_api.async_register_command(hass, handler)
@@ -715,7 +850,7 @@ async def async_unload_strip_studio_entry(hass: HomeAssistant, entry_id: str) ->
     studio = hass.data.get(_DATA)
     if studio is None:
         return
-    await studio.async_stop(entry_id, notify=False)
+    await studio.async_stop(entry_id, notify=False)  # also ends a running choreo
     studio.players.pop(entry_id, None)
     studio.native.pop(entry_id, None)
     studio._native_next.pop(entry_id, None)

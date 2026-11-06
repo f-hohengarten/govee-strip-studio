@@ -137,19 +137,19 @@ set_dreamview_sound_effects:
 
 play_studio_effect:
   name: Strip-Studio-Effekt abspielen
-  description: Spielt einen in Strip Studio gespeicherten Effekt (auch Darts-Effekte) auf dem Streifen ab.
+  description: Spielt einen in Strip Studio gespeicherten Effekt (auch Darts-Effekte) oder eine Choreo auf dem Streifen ab.
   target: {entity: {integration: govee_strip_studio, domain: light}}
   fields:
     effect:
       name: Effekt
-      description: Name des gespeicherten Effekts, wie er in Strip Studio steht (Groß-/Kleinschreibung egal).
+      description: Name des gespeicherten Effekts oder der Choreo, wie er in Strip Studio steht (Groß-/Kleinschreibung egal).
       required: true
       example: Abendwelle
       selector: {text:}
 
 stop_studio_effect:
   name: Strip-Studio-Effekt stoppen
-  description: Beendet den laufenden Strip-Studio-Effekt. Der Streifen behält das zuletzt gezeigte Bild.
+  description: Beendet den laufenden Strip-Studio-Effekt oder die laufende Choreo. Der Streifen behält das zuletzt gezeigte Bild.
   target: {entity: {integration: govee_strip_studio, domain: light}}
 
 set_darts_mode:

@@ -20,6 +20,7 @@ OWN = [
     "darts_rules.py",
     "darts_presets.py",
     "darts_caller.py",
+    "studio_choreo.py",
     "studio_render.py",
 ]
 

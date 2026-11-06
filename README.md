@@ -16,6 +16,10 @@ Effekt-Editor heißt hier „Effect Studio (Experte)“.
 - **Einstellungen:** Tempo, Blocklänge, Lücke, Welle (Fade), Helligkeit, Hintergrundfarbe.
 - **Live-Vorschau** im Browser mit derselben Rechenlogik wie auf dem Streifen.
 - **Effekt-Bibliothek:** Effekte speichern, bearbeiten, löschen und abspielen.
+- **Choreos** (Ansicht „🎬 Choreos“): gespeicherte Effekte nacheinander reihen, mit eigener
+  Dauer pro Schritt, Zeitleiste und Live-Vorschau. Am Ende läuft der letzte Effekt weiter,
+  die Choreo wiederholt sich, der Streifen hält an oder das Licht geht aus. Eine Choreo
+  endet vorzeitig mit „Stopp“, beim Ausschalten des Lichts oder wenn ein anderer Effekt startet.
 
 Effekte werden von Home Assistant Bild für Bild an den Streifen gesendet. Bewegungen laufen
 deshalb in ruhigen Schritten (etwa 2–5 pro Sekunde, abhängig von der Zahl der Farben).
@@ -62,17 +66,17 @@ eigene Automationen.
 
 ## Automationen
 
-Gespeicherte Effekte (auch Darts-Effekte) lassen sich in Automationen und Skripten nutzen:
+Gespeicherte Effekte (auch Darts-Effekte) und Choreos lassen sich in Automationen und Skripten nutzen:
 
 ```yaml
-# Effekt per Name abspielen
+# Effekt oder Choreo per Name abspielen
 action: govee_strip_studio.play_studio_effect
 target:
   entity_id: light.dart
 data:
   effect: Abendwelle
 
-# Studio-Effekt beenden
+# Studio-Effekt oder Choreo beenden
 action: govee_strip_studio.stop_studio_effect
 target:
   entity_id: light.dart

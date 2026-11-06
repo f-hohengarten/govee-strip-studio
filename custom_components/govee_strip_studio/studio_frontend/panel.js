@@ -181,6 +181,22 @@ const css = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
 const clone = (o) => JSON.parse(JSON.stringify(o));
 const DARTS_GROUP = "darts";
 const isDartsEffect = (item) => item?.group === DARTS_GROUP;
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+// Choreos: saved effects one after another (validated again by studio_choreo.py).
+const CHOREO_ENDS = [
+  { id: "keep", label: "Letzter Effekt läuft weiter" },
+  { id: "loop", label: "Endlos wiederholen" },
+  { id: "stop", label: "Anhalten (letztes Bild bleibt)" },
+  { id: "off", label: "Licht ausschalten" },
+];
+const STEP_SECONDS = 10;
+const newChoreo = () => ({ name: "", steps: [], end: "keep" });
+const choreoSeconds = (c) => c.steps.reduce((sum, s) => sum + (Number(s.seconds) || 0), 0);
+const fmtSeconds = (s) => {
+  s = Math.round(s * 10) / 10;
+  return s < 60 ? `${s} s` : `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")} min`;
+};
 
 const DEFAULT_EFFECT = {
   type: "marquee",
@@ -219,6 +235,12 @@ class GoveeStripStudioPanel extends HTMLElement {
     this._status = null;
     this._message = null;
     this._liveTimer = null;
+    this._view = "effects"; // effects | choreos
+    this._choreo = newChoreo();
+    this._choreoId = null;
+    this._choreoDirty = false;
+    this._choreoT0 = performance.now();
+    this._choreoShown = -1; // step the preview label currently shows
   }
 
   set hass(hass) {
@@ -363,7 +385,11 @@ class GoveeStripStudioPanel extends HTMLElement {
   }
   async _deleteEffect(id) {
     const name = this._info.effects[id]?.name;
-    if (!confirm(`„${name}“ wirklich löschen?`)) return;
+    const usedIn = Object.values(this._info.choreos || {})
+      .filter((c) => c.steps.some((s) => s.effect_id === id))
+      .map((c) => `„${c.name}“`);
+    const note = usedIn.length ? `\n\nEr kommt in diesen Choreos vor und wird dort übersprungen: ${usedIn.join(", ")}` : "";
+    if (!confirm(`„${name}“ wirklich löschen?${note}`)) return;
     const res = await this._call({ type: `${WS}/effects/delete`, effect_id: id });
     this._info.effects = res.effects;
     if (this._editingId === id) this._editingId = null;
@@ -426,16 +452,30 @@ class GoveeStripStudioPanel extends HTMLElement {
     const cells = root.querySelectorAll(".preview .cell");
     if (!cells.length || !this._device()) return;
     const dev = this._device();
-    const t = (performance.now() - this._t0) / 1000;
+    let effect = this._effect;
+    let t = (performance.now() - this._t0) / 1000;
+    if (this._view === "choreos") {
+      // The choreo preview loops through its steps, whatever the end action is.
+      const at = this._choreoAt((performance.now() - this._choreoT0) / 1000);
+      this._showChoreoStep(at);
+      if (!at) {
+        cells.forEach((cell) => {
+          cell.style.background = "transparent";
+          cell.style.boxShadow = "none";
+        });
+        return;
+      }
+      ({ effect, t } = at);
+    }
     // One cell per visible IC.  Native frames are per IC already; Home Assistant frames are
     // per segment, and every IC of a segment shows that segment's colour (as on the strip).
     let colorOf;
     try {
-      if (this._native()) {
-        const frame = nativeFrame(this._effect, this._unitGeometry(), t);
+      if (effect.playback === "native") {
+        const frame = nativeFrame(effect, { ...this._geometry, units: dev.ic_count }, t);
         colorOf = (ic) => frame[ic];
       } else {
-        const frame = render(this._effect, this._segGeometry(), t);
+        const frame = render(effect, this._segGeometry(), t);
         colorOf = (ic) => frame[Math.ceil((ic * dev.segment_count) / dev.ic_count)];
       }
     } catch (e) {
@@ -448,10 +488,112 @@ class GoveeStripStudioPanel extends HTMLElement {
     });
   }
 
+  // ---------- choreos ----------
+  // Step at `elapsed` seconds of the looping preview: { index, effect, t } or null.
+  _choreoAt(elapsed) {
+    const steps = this._choreo.steps
+      .map((s, index) => ({ index, seconds: Number(s.seconds) || 0, saved: this._info.effects[s.effect_id] }))
+      .filter((s) => s.saved && s.seconds > 0);
+    const total = steps.reduce((sum, s) => sum + s.seconds, 0);
+    if (!total) return null;
+    let t = elapsed % total;
+    for (const s of steps) {
+      if (t < s.seconds) return { index: s.index, effect: { ...DEFAULT_EFFECT, ...s.saved.effect }, t, elapsed: elapsed % total, total };
+      t -= s.seconds;
+    }
+    return null;
+  }
+  _showChoreoStep(at) {
+    const root = this.shadowRoot;
+    const head = root.querySelector(".playhead");
+    if (head) head.style.left = at ? `${(100 * at.elapsed) / at.total}%` : "0";
+    const index = at ? at.index : -1;
+    if (index === this._choreoShown) return;
+    this._choreoShown = index;
+    root.querySelectorAll("[data-step-row]").forEach((el) => el.classList.toggle("now", Number(el.dataset.stepRow) === index));
+    root.querySelectorAll("[data-tl]").forEach((el) => el.classList.toggle("now", Number(el.dataset.tl) === index));
+    const label = root.querySelector(".choreo-now");
+    if (label) {
+      const name = at ? this._info.effects[this._choreo.steps[index].effect_id]?.name : null;
+      label.innerHTML = at ? `Vorschau: Schritt ${index + 1} · <b>${esc(name)}</b>` : "Vorschau: noch keine Schritte";
+    }
+  }
+  _restartChoreoPreview(index = 0) {
+    let start = 0;
+    this._choreo.steps.slice(0, index).forEach((s) => {
+      if (this._info.effects[s.effect_id]) start += Number(s.seconds) || 0;
+    });
+    this._choreoT0 = performance.now() - start * 1000;
+    this._choreoShown = -2;
+  }
+  _choreoChanged() {
+    this._choreoDirty = true;
+    this._restartChoreoPreview();
+    this._render();
+  }
+  _newChoreoDraft() {
+    if (this._choreoDirty && this._choreo.steps.length && !confirm("Ungespeicherte Änderungen an der Choreo verwerfen?")) return;
+    this._choreo = newChoreo();
+    this._choreoId = null;
+    this._choreoDirty = false;
+    this._restartChoreoPreview();
+    this._render();
+  }
+  _loadChoreo(id) {
+    if (this._choreoDirty && this._choreo.steps.length && !confirm("Ungespeicherte Änderungen an der Choreo verwerfen?")) return;
+    this._choreo = clone(this._info.choreos[id]);
+    this._choreoId = id;
+    this._choreoDirty = false;
+    this._restartChoreoPreview();
+    this._render();
+  }
+  async _saveChoreo() {
+    const c = this._choreo;
+    c.name = (c.name || "").trim();
+    if (!c.name) {
+      this._toast("error", "Bitte gib der Choreo einen Namen");
+      throw new Error("name missing");
+    }
+    if (!c.steps.length) {
+      this._toast("error", "Füge mindestens einen Effekt hinzu");
+      throw new Error("no steps");
+    }
+    const msg = { type: `${WS}/choreos/save`, choreo: c };
+    if (this._choreoId) msg.choreo_id = this._choreoId;
+    const res = await this._call(msg);
+    this._info.choreos = res.choreos;
+    this._choreoId = res.choreo_id;
+    this._choreo = clone(res.choreos[res.choreo_id]);
+    this._choreoDirty = false;
+    this._toast("ok", `Choreo „${c.name}“ gespeichert`);
+  }
+  async _playChoreo(id) {
+    await this._call({ type: `${WS}/play`, entry_id: this._entryId, choreo_id: id });
+    this._toast("ok", `Choreo „${this._info.choreos[id]?.name}“ läuft auf dem Streifen`);
+  }
+  async _deleteChoreo(id) {
+    const name = this._info.choreos[id]?.name;
+    if (!confirm(`Choreo „${name}“ wirklich löschen?`)) return;
+    const res = await this._call({ type: `${WS}/choreos/delete`, choreo_id: id });
+    this._info.choreos = res.choreos;
+    if (this._choreoId === id) {
+      this._choreoId = null;
+      this._choreoDirty = true;
+    }
+    this._render();
+  }
+
   _renderStatus() {
     const el = this.shadowRoot.querySelector(".status");
     if (!el) return;
     const s = this._status;
+    const choreo = this._device()?.choreo;
+    if (choreo) {
+      el.innerHTML = `<span class="dot on"></span> Choreo: <b>${esc(choreo.name)}</b> · Schritt ${choreo.step || 1}/${choreo.steps}${
+        choreo.error ? ` · <span class="warn">${esc(choreo.error)}</span>` : ""
+      }`;
+      return;
+    }
     const native = this._device()?.native;
     if (native && !(s && s.running)) {
       el.innerHTML = native.error
@@ -505,9 +647,14 @@ class GoveeStripStudioPanel extends HTMLElement {
                   .join("")}</select>`
               : `<div class="sub">${dev.title}</div>`
           }
+          <div class="views" role="tablist">
+            <button role="tab" data-view="effects" class="${this._view === "effects" ? "sel" : ""}">Effekte</button>
+            <button role="tab" data-view="choreos" class="${this._view === "choreos" ? "sel" : ""}">🎬 Choreos</button>
+          </div>
           <a class="mode" href="/darts" data-act="go-darts" title="Caller, Ton und LED-Reaktionen für Autodarts">🎯 Darts</a>
         </header>
         ${this._message ? `<div class="toast ${this._message.kind}">${this._message.text}</div>` : ""}
+        ${this._view === "choreos" ? this._choreoView() : `
 
         <section class="card hero">
           <div class="preview-head">
@@ -595,11 +742,132 @@ class GoveeStripStudioPanel extends HTMLElement {
                 : `<p class="hint">Noch keine Darts-Effekte. Auf der Darts-Seite legt „✨ Vorlagen anlegen“ eine fertige Auswahl an.</p>`
             }</div>
           </section>
-        </div>
+        </div>`}
       </div>`;
     this._bind();
     this._renderStatus();
     this._drawPreview();
+  }
+
+  _choreoView() {
+    const c = this._choreo;
+    const effects = Object.entries(this._info.effects || {}).sort(
+      ([, a], [, b]) => isDartsEffect(a) - isDartsEffect(b) || a.name.localeCompare(b.name, "de"),
+    );
+    const choreos = Object.entries(this._info.choreos || {});
+    const total = choreoSeconds(c);
+    const gradient = (eff) => {
+      const cols = eff.type === "segments" ? (eff.segments || []).filter(Boolean).slice(0, 6) : eff.colors || [];
+      const list = (cols.length ? cols : [[40, 40, 40]]).map(css);
+      return list.length > 1 ? `linear-gradient(90deg,${list.join(",")})` : list[0];
+    };
+    const options = (selected) =>
+      (this._info.effects[selected] ? "" : `<option value="" selected>(gelöschter Effekt)</option>`) +
+      effects
+        .map(([id, item]) => `<option value="${id}" ${id === selected ? "selected" : ""}>${isDartsEffect(item) ? "🎯 " : ""}${esc(item.name)}</option>`)
+        .join("");
+    const timeline = c.steps
+      .map((s, i) => {
+        const saved = this._info.effects[s.effect_id];
+        return `<button class="tl ${saved ? "" : "missing"}" data-tl="${i}" style="flex:${Number(s.seconds) || 0.5} 1 0;background:${
+          saved ? gradient(saved.effect) : "transparent"
+        }" title="${esc(saved?.name || "gelöscht")} · ${fmtSeconds(Number(s.seconds) || 0)}"><span>${i + 1}</span></button>`;
+      })
+      .join("");
+    const rows = c.steps
+      .map((s, i) => {
+        const saved = this._info.effects[s.effect_id];
+        return `<div class="step" data-step-row="${i}">
+          <span class="num">${i + 1}</span>
+          <span class="sw">${saved ? this._swatch(saved.effect) : ""}</span>
+          <select data-step-effect="${i}" aria-label="Effekt von Schritt ${i + 1}">${options(s.effect_id)}</select>
+          <label class="secs"><input type="number" min="0.5" max="3600" step="0.5" value="${s.seconds}" data-step-secs="${i}" aria-label="Dauer von Schritt ${i + 1} in Sekunden"/> s</label>
+          <span class="step-btns">
+            <button data-step-move="${i}:-1" title="Nach oben" ${i === 0 ? "disabled" : ""}>↑</button>
+            <button data-step-move="${i}:1" title="Nach unten" ${i === c.steps.length - 1 ? "disabled" : ""}>↓</button>
+            <button data-step-dup="${i}" title="Doppeln">⧉</button>
+            <button data-step-del="${i}" title="Entfernen">✕</button>
+          </span>
+        </div>`;
+      })
+      .join("");
+    const endLabel = (id) => CHOREO_ENDS.find((e) => e.id === id)?.label || "";
+    return `
+        <section class="card hero">
+          <div class="preview-head">
+            <span class="choreo-now"></span>
+            <span class="status"></span>
+          </div>
+          <div class="preview">${this._previewCells()}</div>
+          <div class="timeline">${timeline || `<div class="tl-empty">Zeitleiste – füge unten Effekte hinzu</div>`}${
+            c.steps.length ? `<i class="playhead"></i>` : ""
+          }</div>
+          <div class="actions">
+            <button class="primary" data-act="choreo-play" ${c.steps.length ? "" : "disabled"}>▶ ${
+              this._choreoDirty || !this._choreoId ? "Speichern & abspielen" : "Auf Streifen abspielen"
+            }</button>
+            <button data-act="stop">■ Stopp</button>
+            <span class="hint inline">${c.steps.length} ${c.steps.length === 1 ? "Schritt" : "Schritte"} · ${fmtSeconds(total)} · ${endLabel(c.end)}</span>
+          </div>
+        </section>
+
+        <div class="grid">
+          <section class="card wide">
+            <h2>${this._choreoId ? "Choreo bearbeiten" : "Neue Choreo"}</h2>
+            <div class="save-row">
+              <input class="choreo-name" placeholder="Name, z. B. Game on" value="${esc(c.name)}" maxlength="40"/>
+              <button class="primary" data-act="choreo-save">${this._choreoId ? "Aktualisieren" : "Speichern"}</button>
+              <button data-act="choreo-new">＋ Neue Choreo</button>
+            </div>
+
+            <h3>Ablauf</h3>
+            <div class="steps">${rows || `<p class="hint">Noch leer. Klicke unten auf Effekte, um sie der Reihe nach anzuhängen.</p>`}</div>
+
+            <h3>Effekt anhängen</h3>
+            ${
+              effects.length
+                ? `<div class="palette">${effects
+                    .map(
+                      ([id, item]) =>
+                        `<button class="chip" data-step-add="${id}" title="Als Schritt ${c.steps.length + 1} anhängen"><span class="sw">${this._swatch(item.effect)}</span>${
+                          isDartsEffect(item) ? "🎯 " : ""
+                        }${esc(item.name)}</button>`,
+                    )
+                    .join("")}</div>`
+                : `<p class="hint">Noch keine Effekte gespeichert. Baue sie unter „Effekte“ und speichere sie, dann kannst du sie hier aneinanderreihen.</p>`
+            }
+
+            <h3>Am Ende</h3>
+            <div class="tools">${CHOREO_ENDS.map(
+              (e) => `<button data-choreo-end="${e.id}" class="${c.end === e.id ? "sel" : ""}">${e.label}</button>`,
+            ).join("")}</div>
+          </section>
+
+          <section class="card wide">
+            <h2>Meine Choreos</h2>
+            <p class="hint">In Automationen startest du eine Choreo wie einen Effekt: Aktion „Strip-Studio-Effekt abspielen“ mit dem Namen der Choreo.</p>
+            <div class="lib">${
+              choreos.length
+                ? choreos
+                    .map(
+                      ([id, item]) => `<div class="item ${id === this._choreoId ? "sel" : ""}">
+                <div class="sw">${item.steps
+                  .slice(0, 6)
+                  .map((s) => `<i style="background:${this._info.effects[s.effect_id] ? gradient(this._info.effects[s.effect_id].effect) : "transparent"}"></i>`)
+                  .join("")}</div>
+                <div class="meta"><b>${esc(item.name)}</b><span>${item.steps.length} ${item.steps.length === 1 ? "Schritt" : "Schritte"} · ${fmtSeconds(
+                  choreoSeconds(item),
+                )}${item.end === "loop" ? " · wiederholt" : item.end === "off" ? " · dann aus" : ""}</span></div>
+                <button data-choreo-play="${id}" title="Abspielen">▶</button>
+                <button data-choreo-edit="${id}" title="Bearbeiten">✎</button>
+                <button data-choreo-del="${id}" title="Löschen">🗑</button>
+              </div>`,
+                    )
+                    .join("")
+                : `<p class="hint">Noch keine Choreos gespeichert.</p>`
+            }</div>
+          </section>
+        </div>`;
   }
 
   _swatch(eff) {
@@ -857,8 +1125,72 @@ class GoveeStripStudioPanel extends HTMLElement {
       history.pushState(null, "", "/darts");
       window.dispatchEvent(new CustomEvent("location-changed"));
     });
-    // geometry
-    on("[data-ic]", "click", (ev) => {
+    // views
+    on("[data-view]", "click", (ev) => {
+      this._view = ev.currentTarget.dataset.view;
+      this._restartChoreoPreview();
+      this._render();
+    });
+    // choreos
+    on(".choreo-name", "input", (ev) => {
+      this._choreo.name = ev.target.value;
+      this._choreoDirty = true;
+    });
+    on("[data-step-add]", "click", (ev) => {
+      this._choreo.steps.push({ effect_id: ev.currentTarget.dataset.stepAdd, seconds: STEP_SECONDS });
+      this._choreoChanged();
+      this._restartChoreoPreview(this._choreo.steps.length - 1);
+    });
+    on("[data-step-effect]", "change", (ev) => {
+      const i = Number(ev.target.dataset.stepEffect);
+      this._choreo.steps[i].effect_id = ev.target.value;
+      this._choreoChanged();
+      this._restartChoreoPreview(i);
+    });
+    on("[data-step-secs]", "change", (ev) => {
+      const i = Number(ev.target.dataset.stepSecs);
+      const v = Math.min(3600, Math.max(0.5, Number(ev.target.value) || STEP_SECONDS));
+      this._choreo.steps[i].seconds = Math.round(v * 10) / 10;
+      this._choreoChanged();
+      this._restartChoreoPreview(i);
+    });
+    on("[data-step-move]", "click", (ev) => {
+      const [i, d] = ev.currentTarget.dataset.stepMove.split(":").map(Number);
+      const steps = this._choreo.steps;
+      [steps[i], steps[i + d]] = [steps[i + d], steps[i]];
+      this._choreoChanged();
+      this._restartChoreoPreview(i + d);
+    });
+    on("[data-step-dup]", "click", (ev) => {
+      const i = Number(ev.currentTarget.dataset.stepDup);
+      this._choreo.steps.splice(i + 1, 0, { ...this._choreo.steps[i] });
+      this._choreoChanged();
+      this._restartChoreoPreview(i + 1);
+    });
+    on("[data-step-del]", "click", (ev) => {
+      this._choreo.steps.splice(Number(ev.currentTarget.dataset.stepDel), 1);
+      this._choreoChanged();
+    });
+    on("[data-tl]", "click", (ev) => this._restartChoreoPreview(Number(ev.currentTarget.dataset.tl)));
+    on("[data-choreo-end]", "click", (ev) => {
+      this._choreo.end = ev.currentTarget.dataset.choreoEnd;
+      this._choreoChanged();
+    });
+    on("[data-act=choreo-save]", "click", () => this._saveChoreo().then(() => this._render()).catch(() => {}));
+    on("[data-act=choreo-new]", "click", () => this._newChoreoDraft());
+    on("[data-act=choreo-play]", "click", async () => {
+      try {
+        if (this._choreoDirty || !this._choreoId) await this._saveChoreo();
+        await this._playChoreo(this._choreoId);
+      } catch (err) {
+        /* reported by _toast */
+      }
+    });
+    on("[data-choreo-play]", "click", (ev) => this._playChoreo(ev.currentTarget.dataset.choreoPlay).catch(() => {}));
+    on("[data-choreo-edit]", "click", (ev) => this._loadChoreo(ev.currentTarget.dataset.choreoEdit));
+    on("[data-choreo-del]", "click", (ev) => this._deleteChoreo(ev.currentTarget.dataset.choreoDel));
+    // geometry (only the chips of the strip card, not the preview cells)
+    on(".geo [data-ic]", "click", (ev) => {
       const i = Number(ev.currentTarget.dataset.ic);
       const g = this._geometry;
       if (this._geoMode === "center") {
@@ -924,7 +1256,7 @@ select.device{margin-left:8px;padding:6px 10px;border-radius:8px;background:var(
 .mode:hover{border-color:var(--primary-color)}
 .darts-lib-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px}
 .darts-lib-head .actions{margin:0}
-@media (max-width:900px){.grid{grid-template-columns:1fr}}
+@media (max-width:900px){.grid{grid-template-columns:minmax(0,1fr)}}
 h2{font-size:17px;margin:0 0 12px;font-weight:500}
 h3{font-size:13px;text-transform:uppercase;letter-spacing:.06em;opacity:.65;margin:18px 0 8px;font-weight:500}
 .hint{font-size:13px;opacity:.7;margin:0 0 10px;line-height:1.4}
@@ -982,8 +1314,8 @@ input[type=color]::-moz-color-swatch{border:2px solid var(--divider-color);borde
 .ic.c-right::after{right:-3px}
 .ic.c-left::before{left:-3px}
 .geo-legend{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:13px;opacity:.75;margin-top:10px}
-.save-row{display:flex;gap:8px;margin-bottom:12px}
-.save-row .name{flex:1;padding:9px 12px;border-radius:10px;border:1px solid var(--divider-color);background:var(--secondary-background-color);color:inherit;font:inherit}
+.save-row{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.save-row input{flex:1 1 180px;min-width:0;padding:9px 12px;border-radius:10px;border:1px solid var(--divider-color);background:var(--secondary-background-color);color:inherit;font:inherit}
 .lib{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px}
 .item{display:flex;align-items:center;gap:8px;padding:8px;border-radius:12px;border:1px solid var(--divider-color)}
 .item.sel{border-color:var(--primary-color)}
@@ -995,6 +1327,35 @@ input[type=color]::-moz-color-swatch{border:2px solid var(--divider-color);borde
 .toast{margin:0 0 12px;padding:10px 14px;border-radius:10px;font-size:14px}
 .toast.ok{background:color-mix(in srgb,var(--success-color,#34c759) 18%,transparent)}
 .toast.error{background:color-mix(in srgb,var(--error-color,#ff3b30) 20%,transparent)}
+.views{display:flex;gap:4px;padding:3px;border-radius:999px;border:1px solid var(--divider-color);margin-left:8px}
+.views button{border:none;border-radius:999px;padding:5px 12px;font-size:14px;background:none}
+.views button.sel{background:var(--primary-color);color:var(--text-primary-color,#fff);box-shadow:none}
+@media (max-width:600px){header{gap:8px}header .sub{display:none}.views{margin-left:0}.views button{padding:5px 9px}.mode{padding:6px 10px}}
+.choreo-now{opacity:.85}
+.timeline{position:relative;display:flex;gap:3px;margin-top:10px;height:34px}
+.tl{min-width:22px;padding:0;border-radius:8px;border:2px solid transparent;position:relative;overflow:hidden}
+.tl span{position:absolute;left:6px;top:50%;transform:translateY(-50%);font-size:12px;font-weight:600;color:#fff;text-shadow:0 0 3px #000}
+.tl.now{border-color:var(--primary-text-color)}
+.tl.missing{background:repeating-linear-gradient(45deg,transparent 0 5px,color-mix(in srgb,var(--error-color,#ff3b30) 40%,transparent) 5px 7px)!important}
+.tl-empty{flex:1;display:flex;align-items:center;justify-content:center;font-size:13px;opacity:.6;border:1px dashed var(--divider-color);border-radius:8px}
+.playhead{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--primary-text-color);border-radius:1px;pointer-events:none}
+.hint.inline{margin:0}
+.steps{display:flex;flex-direction:column;gap:6px}
+.step{display:grid;grid-template-columns:24px 44px minmax(0,1fr) auto auto;align-items:center;gap:8px;padding:6px 8px;border-radius:12px;border:1px solid var(--divider-color)}
+.step.now{border-color:var(--primary-color);background:color-mix(in srgb,var(--primary-color) 8%,transparent)}
+.step .num{font-weight:600;text-align:center;opacity:.7}
+.step .sw{display:flex;height:24px;border-radius:6px;overflow:hidden}
+.step .sw i{flex:1}
+.step select,.step input{font:inherit;color:inherit;background:var(--secondary-background-color);border:1px solid var(--divider-color);border-radius:8px;padding:6px 8px;min-width:0}
+.step .secs{display:flex;align-items:center;gap:4px;font-size:14px}
+.step .secs input{width:72px}
+.step-btns{display:flex;gap:4px}
+.step-btns button{padding:5px 8px}
+@media (max-width:600px){.step{grid-template-columns:24px minmax(0,1fr) auto}.step .sw{display:none}.step-btns{grid-column:1 / -1;justify-content:flex-end}}
+.palette{display:flex;flex-wrap:wrap;gap:6px}
+.chip{display:flex;align-items:center;gap:8px;border-radius:999px;padding:5px 12px 5px 5px;font-size:14px}
+.chip .sw{display:flex;width:28px;height:20px;border-radius:999px;overflow:hidden}
+.chip .sw i{flex:1}
 `;
 
 customElements.define("govee-strip-studio-panel", GoveeStripStudioPanel);

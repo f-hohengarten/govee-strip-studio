@@ -23,6 +23,7 @@ custom_components/govee_strip_studio/   die Integration (Domain: govee_strip_stu
   darts_rules.py           EIGEN: reine Ereignis-Klassifikation (kein HA-Import)
   darts_presets.py         EIGEN: fertige Darts-Effekte + Standard-Zuordnung (kein HA-Import)
   darts_caller.py          EIGEN: darts-caller-Fernsteuerung (Optionen → Textbefehle, Sound-Pfade; kein HA-Import)
+  studio_choreo.py         EIGEN: Choreo-Validierung (Effekte nacheinander mit Dauer; kein HA-Import)
   studio_services.yaml     EIGEN: Beschreibung der Studio-Aktionen; sync hängt sie an services.yaml an
   alles andere             UPSTREAM (umbenannt) – nicht direkt bearbeiten, siehe unten
 tools/sync_upstream.py     erzeugt den Fork aus einem Upstream-Release neu
