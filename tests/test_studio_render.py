@@ -1,4 +1,4 @@
-"""Tests for the pure Strip Studio render engine.
+"""Tests for the pure Light Studio render engine.
 
 Runs without Home Assistant: studio_render.py is loaded straight from its file so the
 package __init__ (which imports Home Assistant) is never executed.

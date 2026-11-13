@@ -1,4 +1,4 @@
-"""Light entity for HA Govee Strip Studio."""
+"""Light entity for HA Light Studio."""
 
 # fmt: off
 import asyncio

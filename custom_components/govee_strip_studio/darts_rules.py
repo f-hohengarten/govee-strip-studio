@@ -1,4 +1,4 @@
-"""Map darts-caller game events onto Strip Studio triggers.
+"""Map darts-caller game events onto Light Studio triggers.
 
 Pure and dependency-free (tests load it directly).  darts-caller
 (https://github.com/Peschi90/darts-caller) forwards autodarts.io game events as
@@ -9,7 +9,7 @@ Socket.IO ``message`` payloads such as::
     {"event": "darts-thrown", "playerIndex": "0", "game": {"dartValue": "180", ...}}
     {"event": "Board Status", "data": {"status": "Takeout Started"}}
 
-Part of Govee Strip Studio, built on teh-hippo/ha-govee-led-ble (MIT).
+Part of Light Studio, built on teh-hippo/ha-govee-led-ble (MIT).
 """
 
 from __future__ import annotations

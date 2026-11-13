@@ -5,7 +5,7 @@ reactions (single darts, turn colours) use Home Assistant playback: one colour c
 reaches the strip almost at once.  Rarer highlights (big visits, wins) use native
 playback: the upload takes a moment, but the strip then animates smoothly by itself.
 
-Part of Govee Strip Studio, built on teh-hippo/ha-govee-led-ble (MIT).
+Part of Light Studio, built on teh-hippo/ha-govee-led-ble (MIT).
 """
 
 from __future__ import annotations

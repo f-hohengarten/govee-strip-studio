@@ -46,7 +46,7 @@ class GoveeLedBleEditor extends HTMLElement {
         }
       </style>
       <ha-card>
-        <h1>Govee Strip Studio configuration</h1>
+        <h1>Light Studio configuration</h1>
         <p>
           Effect Studio storage is unavailable. Existing light controls are
           unaffected; check the integration logs before retrying.

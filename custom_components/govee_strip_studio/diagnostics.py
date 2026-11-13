@@ -1,4 +1,4 @@
-"""Diagnostics for HA Govee Strip Studio."""
+"""Diagnostics for HA Light Studio."""
 
 import time
 from collections.abc import Mapping

@@ -1,4 +1,4 @@
-"""HA Govee Strip Studio integration."""
+"""HA Light Studio integration."""
 
 import asyncio
 import logging

@@ -133,23 +133,23 @@ set_dreamview_sound_effects:
     enabled: {required: true, selector: {boolean:}}
     softness: {required: true, selector: {number: {min: 0, max: 100, step: 1}}}
 
-# Strip Studio actions (own file; tools/sync_upstream.py appends it to upstream's services.yaml).
+# Light Studio actions (own file; tools/sync_upstream.py appends it to upstream's services.yaml).
 
 play_studio_effect:
-  name: Strip-Studio-Effekt abspielen
-  description: Spielt einen in Strip Studio gespeicherten Effekt (auch Darts-Effekte) oder eine Choreo auf dem Streifen ab.
+  name: Light-Studio-Effekt abspielen
+  description: Spielt einen in Light Studio gespeicherten Effekt (auch Darts-Effekte) oder eine Choreo auf dem Streifen ab.
   target: {entity: {integration: govee_strip_studio, domain: light}}
   fields:
     effect:
       name: Effekt
-      description: Name des gespeicherten Effekts oder der Choreo, wie er in Strip Studio steht (Groß-/Kleinschreibung egal).
+      description: Name des gespeicherten Effekts oder der Choreo, wie er in Light Studio steht (Groß-/Kleinschreibung egal).
       required: true
       example: Abendwelle
       selector: {text:}
 
 stop_studio_effect:
-  name: Strip-Studio-Effekt stoppen
-  description: Beendet den laufenden Strip-Studio-Effekt oder die laufende Choreo. Der Streifen behält das zuletzt gezeigte Bild.
+  name: Light-Studio-Effekt stoppen
+  description: Beendet den laufenden Light-Studio-Effekt oder die laufende Choreo. Der Streifen behält das zuletzt gezeigte Bild.
   target: {entity: {integration: govee_strip_studio, domain: light}}
 
 set_darts_mode:

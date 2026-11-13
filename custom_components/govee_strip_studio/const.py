@@ -1,4 +1,4 @@
-"""Constants for HA Govee Strip Studio."""
+"""Constants for HA Light Studio."""
 
 import re
 from collections.abc import Callable, Mapping

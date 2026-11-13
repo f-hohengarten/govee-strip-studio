@@ -1,7 +1,7 @@
 """Remote control of darts-caller's voice and announcements (pure, no Home Assistant).
 
 darts-caller's own web UI changes the caller by sending plain text messages over its
-Socket.IO channel; this module maps Strip Studio's stored options onto exactly those
+Socket.IO channel; this module maps Light Studio's stored options onto exactly those
 messages and validates the sound paths that darts-caller asks clients to play.
 
     caller:<name>   language:<0-7>   gender:<0-2>   fav:<0|1>
@@ -12,7 +12,7 @@ darts-caller does not report the current argument values back, so the options th
 user set here are stored and sent again whenever the connection (re)starts: a restarted
 caller would otherwise fall back to its command-line defaults.
 
-Part of Govee Strip Studio, built on teh-hippo/ha-govee-led-ble (MIT).
+Part of Light Studio, built on teh-hippo/ha-govee-led-ble (MIT).
 """
 
 from __future__ import annotations

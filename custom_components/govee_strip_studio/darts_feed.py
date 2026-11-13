@@ -17,7 +17,7 @@ darts-caller 3 only admits clients that present a token.  It renders a fresh one
 does the same and fetches it again before every connection.  Older callers render no
 token and accept a plain join.
 
-Part of Govee Strip Studio, built on teh-hippo/ha-govee-led-ble (MIT).
+Part of Light Studio, built on teh-hippo/ha-govee-led-ble (MIT).
 """
 
 from __future__ import annotations
@@ -197,4 +197,4 @@ class DartsFeed:
         try:
             self._on_event(payload)
         except Exception:  # noqa: BLE001 - a bad event must not drop the connection
-            _LOGGER.exception("Strip Studio could not handle darts event %s", self.last_event)
+            _LOGGER.exception("Light Studio could not handle darts event %s", self.last_event)

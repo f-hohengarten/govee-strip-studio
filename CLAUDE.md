@@ -1,7 +1,7 @@
-# CLAUDE.md – Govee Strip Studio
+# CLAUDE.md – Light Studio
 
 Home-Assistant-Custom-Integration (HACS). Fork von teh-hippo/ha-govee-led-ble (MIT) plus
-„Strip Studio“: geometrie-bewusster Effekt-Editor für Govee-RGBIC-Streifen per Bluetooth.
+„Light Studio“: geometrie-bewusster Effekt-Editor für Govee-RGBIC-Streifen per Bluetooth.
 
 **Aktueller Projektstand, Messergebnisse und offene Aufgaben: siehe `HANDOFF.md` – zuerst lesen.**
 

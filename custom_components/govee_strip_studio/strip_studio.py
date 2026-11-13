@@ -1,4 +1,4 @@
-"""Govee Strip Studio: geometry-aware effects authored in Home Assistant.
+"""Light Studio: geometry-aware effects authored in Home Assistant.
 
 Adds a sidebar panel, a small effect library and a frame player on top of the
 coordinator from teh-hippo/ha-govee-led-ble (MIT licence, see LICENSE).
@@ -57,7 +57,7 @@ from .studio_render import (
 
 _LOGGER = logging.getLogger(__name__)
 
-STUDIO_VERSION = "0.4.0"
+STUDIO_VERSION = "0.4.1"
 STORE_KEY = f"{DOMAIN}.strip_studio"
 STORE_VERSION = 1
 PANEL_PATH = "strip-studio"
@@ -284,7 +284,7 @@ class StripStudio:
             raise StudioValidationError("this device does not report its IC count")
         pattern = native_pattern(effect, geometry)
         item = backend.application.new_authored_item(
-            name=(name or "Strip Studio")[:40],
+            name=(name or "Light Studio")[:40],
             content={
                 "kind": "h617a_painted",
                 "effect": pattern.effect,
@@ -733,7 +733,7 @@ async def ws_benchmark(
 
 
 def _entry_id(entity: Any) -> str:
-    """Config entry of a targeted Strip Studio light (resolved by Home Assistant's entity services)."""
+    """Config entry of a targeted Light Studio light (resolved by Home Assistant's entity services)."""
     return entity.coordinator.config_entry.entry_id
 
 
@@ -753,7 +753,7 @@ def _find_saved(studio: StripStudio, wanted: str) -> tuple[str, str, dict[str, A
     effects = ", ".join(sorted(str(item.get("name")) for item in studio.data["effects"].values())) or "none"
     choreos = ", ".join(sorted(str(item.get("name")) for item in studio.data["choreos"].values())) or "none"
     raise ServiceValidationError(
-        f"No Strip Studio effect or choreo named '{wanted}'. Saved effects: {effects}. Saved choreos: {choreos}"
+        f"No Light Studio effect or choreo named '{wanted}'. Saved effects: {effects}. Saved choreos: {choreos}"
     )
 
 
@@ -828,7 +828,7 @@ async def async_setup_strip_studio(hass: HomeAssistant) -> None:
         frontend.async_register_built_in_panel(
             hass,
             component_name="custom",
-            sidebar_title="Strip Studio",
+            sidebar_title="Light Studio",
             sidebar_icon="mdi:led-strip-variant",
             frontend_url_path=PANEL_PATH,
             require_admin=True,

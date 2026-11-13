@@ -8,7 +8,7 @@ effect was deleted later is skipped while playing.
     keep  the last effect keeps running      stop  the strip keeps its last frame
     off   the light is switched off          loop  start again with the first step
 
-Part of Govee Strip Studio, built on teh-hippo/ha-govee-led-ble (MIT).
+Part of Light Studio, built on teh-hippo/ha-govee-led-ble (MIT).
 """
 
 from __future__ import annotations

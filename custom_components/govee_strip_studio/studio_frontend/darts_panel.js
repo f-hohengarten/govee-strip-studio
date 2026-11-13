@@ -1,4 +1,4 @@
-// Darts panel for Govee Strip Studio: Autodarts via darts-caller.
+// Darts panel for Light Studio: Autodarts via darts-caller.
 // Caller audio in this browser (on an output device of choice, e.g. a Bluetooth
 // speaker), caller voice and announcements, board control, live game and LED reactions.
 // Vanilla web component, no build step, no external dependencies.
@@ -819,12 +819,12 @@ class GoveeDartsPanel extends HTMLElement {
                 : `<span class="dur muted" title="Bleibt, bis das nächste Ereignis kommt">bleibt</span>`
             }
             <button data-test="${id}" title="Auf dem Streifen testen" ${rule.effect_id ? "" : "disabled"}>▶</button>
-            <button data-edit="${esc(rule.effect_id || "")}" title="Effekt im Strip Studio bearbeiten" ${rule.effect_id ? "" : "disabled"}>✎</button>
+            <button data-edit="${esc(rule.effect_id || "")}" title="Effekt im Light Studio bearbeiten" ${rule.effect_id ? "" : "disabled"}>✎</button>
           </div>`;
         })
         .join("");
     return `<label class="switch big"><input type="checkbox" data-led="enabled" ${d.enabled ? "checked" : ""} ${d.host ? "" : "disabled"}/><span></span> LED-Reaktionen ${d.enabled ? "an" : "aus"}</label>
-      <p class="hint">Spielt bei Würfen und Spielereignissen gespeicherte Strip-Studio-Effekte. Kurze Effekte kehren danach zur Farbe des Spielers zurück, der dran ist.</p>
+      <p class="hint">Spielt bei Würfen und Spielereignissen gespeicherte Light-Studio-Effekte. Kurze Effekte kehren danach zur Farbe des Spielers zurück, der dran ist.</p>
       <div class="inline">
         ${
           info.devices.length
@@ -835,7 +835,7 @@ class GoveeDartsPanel extends HTMLElement {
         }
         <div class="actions">
           <button data-act="presets" title="Fertige Effekte anlegen und leeren Ereignissen zuordnen">✨ Vorlagen anlegen</button>
-          <button data-act="studio">Effekte im Strip Studio</button>
+          <button data-act="studio">Effekte im Light Studio</button>
           <button class="primary" data-act="save" ${this._dirty ? "" : "disabled"}>Speichern</button>
         </div>
       </div>

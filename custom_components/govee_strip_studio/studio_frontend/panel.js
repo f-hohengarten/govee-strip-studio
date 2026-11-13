@@ -1,4 +1,4 @@
-// Govee Strip Studio panel. Built on teh-hippo/ha-govee-led-ble (MIT).
+// Light Studio panel. Built on teh-hippo/ha-govee-led-ble (MIT).
 const DOMAIN = "govee_strip_studio";
 const WS = `${DOMAIN}/studio`;
 
@@ -266,7 +266,7 @@ class GoveeStripStudioPanel extends HTMLElement {
     try {
       this._info = await this._hass.callWS({ type: `${WS}/info` });
     } catch (err) {
-      this._message = { kind: "error", text: `Strip Studio nicht erreichbar: ${err.message || err}` };
+      this._message = { kind: "error", text: `Light Studio nicht erreichbar: ${err.message || err}` };
       this._render();
       return;
     }
@@ -615,7 +615,7 @@ class GoveeStripStudioPanel extends HTMLElement {
     const root = this.shadowRoot;
     if (!this._info) {
       root.innerHTML = `<style>${STYLE}</style><div class="page"><div class="card">${
-        this._message ? this._message.text : "Lade Strip Studio …"
+        this._message ? this._message.text : "Lade Light Studio …"
       }</div></div>`;
       return;
     }
@@ -639,7 +639,7 @@ class GoveeStripStudioPanel extends HTMLElement {
       <div class="page">
         <header>
           <ha-menu-button></ha-menu-button>
-          <div class="title">Strip Studio</div>
+          <div class="title">Light Studio</div>
           ${
             this._info.devices.length > 1
               ? `<select class="device">${this._info.devices
@@ -698,7 +698,9 @@ class GoveeStripStudioPanel extends HTMLElement {
                 ? `<h3>Richtung</h3><div class="dirs">${DIRECTIONS.filter((d) => !native || NATIVE_DIRECTIONS.includes(d.id)).map(
                     (d) => `<button class="dir ${e.direction === d.id ? "sel" : ""}" data-dir="${d.id}" title="${d.label}"><span class="glyph">${d.glyph}</span><span>${d.label}</span></button>`,
                   ).join("")}</div>`
-                : ""
+                : native && e.type === "gradient"
+                  ? `<h3>Richtung</h3><p class="hint">Den weichen Verlauf bewegt der Streifen selbst, die Laufrichtung legt seine Firmware fest. Für eine eigene Richtung „Präzise (Home Assistant)“ wählen.</p>`
+                  : ""
             }
             ${this._sliders()}
           </section>
@@ -845,7 +847,7 @@ class GoveeStripStudioPanel extends HTMLElement {
 
           <section class="card wide">
             <h2>Meine Choreos</h2>
-            <p class="hint">In Automationen startest du eine Choreo wie einen Effekt: Aktion „Strip-Studio-Effekt abspielen“ mit dem Namen der Choreo.</p>
+            <p class="hint">In Automationen startest du eine Choreo wie einen Effekt: Aktion „Light-Studio-Effekt abspielen“ mit dem Namen der Choreo.</p>
             <div class="lib">${
               choreos.length
                 ? choreos

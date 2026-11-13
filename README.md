@@ -1,13 +1,13 @@
-# Govee Strip Studio
+# Light Studio
 
 Lokale Bluetooth-Steuerung für Govee-LED-Streifen in Home Assistant – mit einem eigenen
-Bereich **„Strip Studio“** in der Seitenleiste, in dem du Effekte für deinen Streifen baust.
+Bereich **„Light Studio“** in der Seitenleiste, in dem du Effekte für deinen Streifen baust.
 
 Basiert auf [ha-govee-led-ble](https://github.com/teh-hippo/ha-govee-led-ble) von teh-hippo
 (Version 7.34.0, MIT-Lizenz). Alle Funktionen des Originals bleiben erhalten; dessen
 Effekt-Editor heißt hier „Effect Studio (Experte)“.
 
-## Strip Studio
+## Light Studio
 
 - **Streifen-Geometrie:** Anfang, Ende und Zentrum frei festlegen – ideal für gekürzte Streifen.
   Abgeschnittene Segmente werden automatisch dunkel gehalten.
@@ -39,9 +39,9 @@ Die Integration bringt einen zweiten Bereich **„Darts“** in der Seitenleiste
   gespeichert und nach einem Neustart von darts-caller automatisch wieder gesetzt.
 - **Board:** Start, Stopp, Reset, Kalibrieren, nächster Spieler.
 - **LED-Reaktionen:** Würfe, Aufnahmen, Bust, Leg-/Match-Gewinn, Takeout und Spielerwechsel lösen
-  gespeicherte Strip-Studio-Effekte aus; kurze Effekte springen danach auf die Farbe des Spielers
+  gespeicherte Light-Studio-Effekte aus; kurze Effekte springen danach auf die Farbe des Spielers
   am Zug zurück. „✨ Vorlagen anlegen“ legt eine fertige Belegung an, ohne eigene Zuordnungen zu
-  überschreiben. Darts-Effekte selbst baust du im Strip Studio (Haken „🎯 Darts-Effekt“).
+  überschreiben. Darts-Effekte selbst baust du im Light Studio (Haken „🎯 Darts-Effekt“).
 - Die Kopfzeile zeigt, ob darts-caller verbunden **und bei Autodarts angemeldet** ist – ohne
   Anmeldung kommen keine Würfe an.
 
@@ -94,7 +94,7 @@ Darts-Ereignisse kommen als Ereignis `govee_strip_studio_darts` an (Felder `even
 
 1. HACS → oben rechts ⋮ → **Benutzerdefinierte Repositories**
 2. URL dieses Repositories eintragen, Kategorie **Integration**, hinzufügen
-3. „Govee Strip Studio“ herunterladen und Home Assistant neu starten
+3. „Light Studio“ herunterladen und Home Assistant neu starten
 4. Einstellungen → Geräte & Dienste: Der Streifen wird per Bluetooth erkannt → hinzufügen
 
 **Wichtig:** Ein Streifen kann nur mit *einer* Integration gleichzeitig verbunden sein.
@@ -103,7 +103,7 @@ Deaktiviere vorher andere Govee-Bluetooth-Integrationen für dasselbe Gerät
 
 ## Unterstützte Geräte
 
-Wie im Original (u. a. H617A/C/E/F, H6199, H6102 …). Strip Studio benötigt ein Gerät mit
+Wie im Original (u. a. H617A/C/E/F, H6199, H6102 …). Light Studio benötigt ein Gerät mit
 Segment-Steuerung. Getestet mit H617C (30 Chips, 15 Segmente).
 
 ## Lizenz

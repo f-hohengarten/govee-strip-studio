@@ -11,9 +11,9 @@ generated_protocol/ (Kaitai output) and the built frontend bundle.
 Steps (all asserted, the script fails loudly if an anchor moved upstream):
   1. unpack the release into a temp dir
   2. rename domain/branding strings (REPLACEMENTS)
-  3. apply the Strip Studio hook patches to __init__.py and config_flow.py (PATCHES)
+  3. apply the Light Studio hook patches to __init__.py and config_flow.py (PATCHES)
   4. rewrite manifest.json
-  5. copy the Strip Studio files from the current tree on top
+  5. copy the Light Studio files from the current tree on top
   6. replace custom_components/govee_strip_studio
 """
 
@@ -37,7 +37,7 @@ REPLACEMENTS = [
     ("ha_govee_led_ble", "govee_strip_studio"),
     ("ha-govee-led-ble", "govee-strip-studio"),
     ("Govee Effect Studio", "Effect Studio (Experte)"),
-    ("Govee LED BLE", "Govee Strip Studio"),
+    ("Govee LED BLE", "Light Studio"),
 ]
 BINARY_SUFFIXES = (".png", ".jpg", ".pyc")
 
@@ -64,7 +64,7 @@ PATCHES: dict[str, list[tuple[str, str]]] = {
         ),
     ],
     "editor.py": [
-        # Strip Studio is the only sidebar entry; the expert editor stays reachable from device pages.
+        # Light Studio is the only sidebar entry; the expert editor stays reachable from device pages.
         ("        show_in_sidebar=True,\n", "        show_in_sidebar=False,\n"),
     ],
     "config_flow.py": [
@@ -131,7 +131,7 @@ def build(release_zip: Path, version: str) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         upstream_version = manifest.get("version")
         manifest.update(
-            name="Govee Strip Studio",
+            name="Light Studio",
             version=version,
             codeowners=[],
             documentation="https://github.com/f-hohengarten/govee-strip-studio",
@@ -147,7 +147,7 @@ def build(release_zip: Path, version: str) -> None:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
 
-        # Strip Studio's actions are described in their own file, appended to upstream's.
+        # Light Studio's actions are described in their own file, appended to upstream's.
         services = work / "services.yaml"
         studio_services = (work / "studio_services.yaml").read_text(encoding="utf-8")
         services.write_text(services.read_text(encoding="utf-8").rstrip("\n") + "\n\n" + studio_services, encoding="utf-8")

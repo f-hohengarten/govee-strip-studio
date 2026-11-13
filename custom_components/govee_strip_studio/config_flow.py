@@ -1,4 +1,4 @@
-"""Config flow for HA Govee Strip Studio."""
+"""Config flow for HA Light Studio."""
 
 from __future__ import annotations
 

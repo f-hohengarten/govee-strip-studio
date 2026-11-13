@@ -14,7 +14,7 @@ One connection to darts-caller (``darts_feed.DartsFeed``) serves three things:
 The connection runs whenever a darts-caller address is set; ``enabled`` only switches
 the LED reactions.
 
-Part of Govee Strip Studio, built on teh-hippo/ha-govee-led-ble (MIT).
+Part of Light Studio, built on teh-hippo/ha-govee-led-ble (MIT).
 """
 
 from __future__ import annotations
@@ -383,7 +383,7 @@ class DartsController:
             # throws never queue up stale effects.
             await self.studio.async_play(entry_id, Effect.from_dict(saved["effect"]), name=saved["name"], live=True)
         except Exception as err:  # noqa: BLE001 - keep reacting to the next throw
-            _LOGGER.warning("Strip Studio could not play %s for darts event %s: %s", saved.get("name"), trigger, err)
+            _LOGGER.warning("Light Studio could not play %s for darts event %s: %s", saved.get("name"), trigger, err)
             return False
         self.active = trigger
         self._notify()

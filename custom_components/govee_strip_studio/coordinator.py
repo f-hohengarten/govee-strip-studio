@@ -1,4 +1,4 @@
-"""DataUpdateCoordinator for HA Govee Strip Studio."""
+"""DataUpdateCoordinator for HA Light Studio."""
 
 import asyncio
 import logging

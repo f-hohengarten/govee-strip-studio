@@ -1,4 +1,4 @@
-"""Check that every Home Assistant name imported by Strip Studio's own files exists.
+"""Check that every Home Assistant name imported by Light Studio's own files exists.
 
 Run against the Home Assistant release you target, e.g.:
 

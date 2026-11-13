@@ -1,9 +1,9 @@
-"""Strip Studio render engine.
+"""Light Studio render engine.
 
 Pure, dependency-free functions that turn an effect definition and a strip
 geometry into per-position colours for a point in time.
 
-Part of Govee Strip Studio, built on teh-hippo/ha-govee-led-ble (MIT).
+Part of Light Studio, built on teh-hippo/ha-govee-led-ble (MIT).
 """
 
 from __future__ import annotations
